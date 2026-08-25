@@ -2,7 +2,8 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cache.news_cache import get_cached_categories, set_cache_categories, get_cache_news_lists, set_cache_news_list, \
-    get_cache_news_detail, set_cache_news_detail, get_news_views, init_news_views, increment_news_views
+    get_cache_news_detail, set_cache_news_detail, get_news_views, init_news_views, increment_news_views, \
+    get_cache_related_news, set_cache_related_news
 from models.news import Category
 from models.news import News
 from sqlalchemy import select
@@ -75,6 +76,7 @@ async def get_news_detail(db: AsyncSession, news_id: int):
             await init_news_views(news_id, views)
         cache_news_detail['views']=views
         return News(**cache_news_detail) # dict转orm
+
     stmt = select(News).where(News.id == news_id)
     result = await db.execute(stmt)
     cache_news_detail = result.scalar_one_or_none()
@@ -105,6 +107,11 @@ async def increase_news_news(db: AsyncSession, news_id: int):
 
 
 async def get_related_news(db: AsyncSession, news_id: int, category_id: int, limit: int = 5):
+    # 查缓存
+    cached_related = await get_cache_related_news(news_id)
+    if cached_related:
+        return cached_related
+
     stmt = select(News).where(
         News.id != news_id,
         News.category_id == category_id
@@ -115,7 +122,7 @@ async def get_related_news(db: AsyncSession, news_id: int, category_id: int, lim
     result = await db.execute(stmt)
     # return result.scalars().all()
     related_news = result.scalars().all()
-    return [{
+    related_news = [{
             "id": news.id,
             "title": news.title,
             "content": news.content,
@@ -125,3 +132,7 @@ async def get_related_news(db: AsyncSession, news_id: int, category_id: int, lim
             "categoryId": news.category_id,
             "views": news.views,
     } for news in related_news]
+
+    # 写缓存（jsonable_encoder 处理 datetime 字段）
+    await set_cache_related_news(news_id, jsonable_encoder(related_news))
+    return related_news

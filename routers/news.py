@@ -50,7 +50,7 @@ async def read_news_detail(news_id: int=Query(..., alias="id"),
     if not news_res:
         raise HTTPException(status_code=404, detail="新闻不存在")
 
-    related_news = await news.get_related_news(db, news_id, news_detail.category_id)
+    related_news = await news_cache.get_related_news(db, news_id, news_detail.category_id)
 
     return {
         "code": 200,

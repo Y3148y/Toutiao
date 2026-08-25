@@ -5,6 +5,7 @@ from config.cache_conf import get_json_cache, set_cache, get_cache, icr, exp
 CATEGORIES_KEY = "news:categories"
 NEWS_LIST_PREFIX = "news_list:"
 NEWS_DETAIL_PREFIX = "news_detail:"
+NEWS_RELATED_PREFIX = "news_related:"
 
 # 读取
 async def get_cached_categories():
@@ -35,6 +36,14 @@ async def set_cache_news_detail(news_id: Optional[int], news_detail: dict, expir
 
 async def get_cache_news_detail(news_id: Optional[int]):
     key = f"{NEWS_DETAIL_PREFIX}{news_id}"
+    return await get_json_cache(key)
+
+async def set_cache_related_news(news_id: int, related_news: list, expire: int = 600):
+    key = f"{NEWS_RELATED_PREFIX}{news_id}"
+    return await set_cache(key, related_news, expire)
+
+async def get_cache_related_news(news_id: int):
+    key = f"{NEWS_RELATED_PREFIX}{news_id}"
     return await get_json_cache(key)
 
 async def get_news_views(news_id: int) -> int:

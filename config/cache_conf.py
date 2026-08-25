@@ -44,7 +44,7 @@ async def set_cache(key: str, value: Any, expire: int= 3600 ):
         return False
 
 async def icr(key):
-    return redis_client.incr(key)
+    return await redis_client.incr(key)
 
 async def exp(key, time=3600):
     await redis_client.expire(key, time)   # 1小时过期，可调
