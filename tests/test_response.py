@@ -118,11 +118,16 @@ def test_news_detail_404_uses_unified_error_shape(client_authed, fake_session, s
 
 
 def test_openapi_documents_all_endpoints():
-    """确认全部业务接口都在（新闻 3 / 收藏 5 / 历史 4 / 用户 5 / AI 4）"""
+    """
+    确认全部业务接口都在。
+
+    新闻 6（分类/列表/详情/信息流/搜索/热榜）
+    收藏 5 / 历史 4 / 用户 5 / AI 4 + 根路径 = 25
+    """
     from main import app
 
     paths = app.openapi()["paths"]
-    assert len(paths) == 22  # 21 个接口 + 根路径 /
+    assert len(paths) == 25  # 24 个业务接口 + 根路径 /
 
     assert set(paths["/api/news/detail"]) == {"get"}
     assert set(paths["/api/user/register"]) == {"post"}
