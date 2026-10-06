@@ -83,12 +83,24 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       # AI（不配置也能起，只是 /api/ai/* 会返回 500）
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
-      DASHSCOPE_EMBED_MODEL: ${DASHSCOPE_EMBED_MODEL:-text-embedding-v4}
-      # 检索参数
-      AI_TOP_K_FINAL: ${AI_TOP_K_FINAL:-5}
-      AI_MIN_FUSION_SCORE: ${AI_MIN_FUSION_SCORE:-0.02}
-      AI_SINGLE_PATH_WEIGHT: ${AI_SINGLE_PATH_WEIGHT:-0.5}
+      # 默认值必须与 ai/config.py 的默认值一致。
+      # 之前这里写死 qwen-plus / text-embedding-v4，是 Docker 与本地配置不一致的根源：
+      # 本地已经切到 deepseek + qwen3.7，容器里却还是旧模型，
+      # 表现为容器内 /api/ai/news-qa 返回 403，而宿主机直连同一个 key 正常。
+      # 环境变量里没显式设置时，让 compose 直接留空、由 ai/config.py 决定，
+      # 这样只有一个配置来源。
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-}
+      DASHSCOPE_EMBED_MODEL: ${DASHSCOPE_EMBED_MODEL:-}
+      DASHSCOPE_EMBED_DIM: ${DASHSCOPE_EMBED_DIM:-}
+      # 检索参数（同样留空，交给 ai/config.py）
+      AI_TOP_K_FINAL: ${AI_TOP_K_FINAL:-}
+      AI_MIN_VECTOR_SIM: ${AI_MIN_VECTOR_SIM:-}
+      AI_MIN_BM25_SCORE: ${AI_MIN_BM25_SCORE:-}
+      AI_MIN_FUSION_SCORE: ${AI_MIN_FUSION_SCORE:-}
+      AI_SINGLE_PATH_WEIGHT: ${AI_SINGLE_PATH_WEIGHT:-}
+      # 成本闸门
+      AI_BUDGET_TOTAL_CNY: ${AI_BUDGET_TOTAL_CNY:-}
+      AI_BUDGET_ASK_CNY: ${AI_BUDGET_ASK_CNY:-}
       # 检索链路追踪：开启后按 request_id 把 trace 落到 Redis
       AI_TRACE_ENABLED: ${AI_TRACE_ENABLED:-false}
       TZ: Asia/Shanghai
@@ -97,6 +109,12 @@ services:
     volumes:
       # 只挂日志目录，方便宿主机查看；代码不挂载，保证与镜像一致
       - app-logs:/app/logs
+      # 离线索引产物：宿主机用 `python -m ai.ingest.cli build` 构建后挂进来。
+      # 不挂的话容器里检索会退化成「运行时从 DB 全量向量化」——
+      # 每次请求 403 条 embedding，耗时长、烧钱，而且 trace 里
+      # gateMode 会变成 bm25_score（余弦拿不到值），误判成「向量服务故障」。
+      # 这也是之前容器内所有问题都被拒答的原因。
+      - ./ai/ingest/index:/app/ai/ingest/index:ro
 
 volumes:
   mysql-data:

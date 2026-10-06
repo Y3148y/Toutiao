@@ -61,13 +61,43 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _upstream_error(response: httpx.Response) -> str:
+    """
+    从上游错误响应里取出可读原因。
+
+    上游的错误码（如 Arrearage 欠费、InvalidApiKey）才是排查的关键信息。
+    只报「连接大模型服务失败」会把人引到网络和代理上去查方向。
+    """
+    try:
+        err = (response.json().get("error") or {})
+        code = err.get("code") or ""
+        message = err.get("message") or ""
+        return f"{code} {message}".strip()
+    except Exception:
+        return response.text[:200]
+
+
+def upstream_status_to_http(status_code: int) -> int:
+    """把上游状态码映射成对调用方更有意义的本服务状态码"""
+    return {
+        401: 502,  # 密钥无效 —— 是服务端配置问题，不是客户端没权限
+        402: 503,  # 欠费 —— 服务不可用
+        429: 429,  # 上游限流 —— 调用方该退避重试
+    }.get(status_code, 502)
+
+
 async def _record_chat_usage(usage: dict | None) -> None:
     """
     把一次问答的 token 用量计入成本闸门。
 
-    DeepSeek 系模型普通输入 ¥1/M 是缓存命中价 ¥0.2/M 的 5 倍，
+    DeepSeek 系模型普通输入 元1/M 是缓存命中价 元0.2/M 的 5 倍，
     而 system prompt 每次请求都完全相同 —— 缓存命中率直接决定成本。
     所以把 cached_tokens 单独记下来，缓存没生效时能立刻看出来。
+
+    实测结论：百炼隐式缓存要求前缀 >= 1024 token（详见 ai/config.py）。
+    我们真实请求的前缀（system 约 200 token + 检索上下文约 700 token）
+    低于该门槛，cached_tokens 恒为 0。日志里缓存命中率一直是 0% 属于预期，
+    不是配置错误 —— 别再花时间调这个。
     """
     if not usage:
         return
@@ -174,8 +204,24 @@ async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db))
                                 },
                             )
                             return
+        except httpx.HTTPStatusError as exc:
+            # 和同步版同样的问题：上游的业务错误不能报成「连接失败」。
+            # 流式已经推出去 sources 事件了，这里只能通过 error 事件告知，
+            # 但至少要把真实原因带上。
+            upstream = _upstream_error(exc.response)
+            logger.error(
+                "大模型返回错误 %s: %s", exc.response.status_code, upstream
+            )
+            yield _sse(
+                "error",
+                {
+                    "message": f"大模型服务返回错误({exc.response.status_code}): {upstream}",
+                    "upstreamStatus": exc.response.status_code,
+                },
+            )
+            return
         except httpx.HTTPError as exc:
-            logger.error("调用大模型失败: %s", exc)
+            logger.error("连接大模型服务失败: %s", exc)
             yield _sse("error", {"message": "连接大模型服务失败，请稍后再试"})
             return
 
@@ -222,8 +268,24 @@ async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
             )
             resp.raise_for_status()
             data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # 区分「上游返回了业务错误」和「网络/服务不可达」。
+        #
+        # 原来所有 httpx.HTTPError 都报「连接大模型服务失败」，结果上游返回
+        # 400 Arrearage（账号欠费）时，客户端看到的也是「连接失败」——
+        # 排查方向被完全带偏，会去查网络和代理，而真实原因是账单。
+        # 状态码和上游的错误码必须透出来。
+        upstream = _upstream_error(exc.response)
+        logger.error(
+            "大模型返回错误 %s: %s", exc.response.status_code, upstream
+        )
+        raise HTTPException(
+            status_code=upstream_status_to_http(exc.response.status_code),
+            detail=f"大模型服务返回错误({exc.response.status_code}): {upstream}",
+        ) from exc
     except httpx.HTTPError as exc:
-        logger.error("调用大模型失败: %s", exc)
+        # 真正的连接层问题：DNS、超时、连接被拒
+        logger.error("连接大模型服务失败: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="连接大模型服务失败"
         ) from exc

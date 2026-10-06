@@ -6,56 +6,90 @@ AI 模块配置。
 """
 import os
 
+
+def _env_str(name: str, default: str) -> str:
+    """
+    读字符串型配置。
+
+    **空字符串按「未设置」处理。** docker-compose 里写 `${VAR:-}` 会给容器注入
+    一个空串，直接 `os.getenv(name, default)` 拿到的是空串而不是默认值 ——
+    于是 `int("")` 抛 ValueError 让容器起不来，而本地跑得好好的，
+    因为本地根本没有这个环境变量。这类故障只在容器里出现，极难排查。
+    """
+    raw = os.getenv(name)
+    return default if raw is None or raw.strip() == "" else raw
+
+
+def _env_int(name: str, default: int) -> int:
+    """读整型配置。空串与非法值都回退到默认值，不让进程崩掉。"""
+    raw = _env_str(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """读浮点型配置。空串与非法值都回退到默认值。"""
+    raw = _env_str(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 # OpenAI 兼容协议（阿里云百炼 DashScope）
-DASHSCOPE_BASE_URL = os.getenv(
+DASHSCOPE_BASE_URL = _env_str(
     "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
-DASHSCOPE_CHAT_MODEL = os.getenv("DASHSCOPE_MODEL", "deepseek-v4-flash-0731")
-DASHSCOPE_EMBED_MODEL = os.getenv(
-    "DASHSCOPE_EMBED_MODEL", "qwen3.7-text-embedding"
-)
+DASHSCOPE_CHAT_MODEL = _env_str("DASHSCOPE_MODEL", "deepseek-v4-flash-0731")
+DASHSCOPE_EMBED_MODEL = _env_str("DASHSCOPE_EMBED_MODEL", "qwen3.7-text-embedding")
 
 # 向量维度。qwen3.7-text-embedding 支持 256/512/768/1024/1536/2048/2560，
 # 换维度会换掉整套向量空间，所以它必须和模型名一样进缓存 key 和索引 manifest，
 # 否则同一模型不同维度的向量会被当成同一种东西复用。
 # 512 维时 403 篇的 .npy 从 1.57 MB 降到约 393 KB，检索精度在这个规模上无明显损失。
-DASHSCOPE_EMBED_DIM = int(os.getenv("DASHSCOPE_EMBED_DIM", "1024"))
+DASHSCOPE_EMBED_DIM = _env_int("DASHSCOPE_EMBED_DIM", 1024)
 
 # ---------------- 成本闸门 ----------------
 
 # 累计花费上限（元）。0 = 不限制。超出后 AI 接口会拒绝继续调用。
 # 生产环境务必设置 —— 代码里一次循环失误就能把账单刷上去。
-BUDGET_TOTAL_CNY = float(os.getenv("AI_BUDGET_TOTAL_CNY", "0") or 0)
+BUDGET_TOTAL_CNY = _env_float("AI_BUDGET_TOTAL_CNY", 0)
 
 # 单次问答的花费上限（元），拦住异常长上下文导致的一次性大额调用
-BUDGET_ASK_CNY = float(os.getenv("AI_BUDGET_ASK_CNY", "0.05") or 0)
+BUDGET_ASK_CNY = _env_float("AI_BUDGET_ASK_CNY", 0.05)
 
 # 达到预算的这个比例时打告警日志
-BUDGET_WARN_RATIO = float(os.getenv("AI_BUDGET_WARN_RATIO", "0.8") or 0.8)
+BUDGET_WARN_RATIO = _env_float("AI_BUDGET_WARN_RATIO", 0.8)
 
 # 单次请求超时。流式问答要设长一点，用户思考和生成都需要时间
-REQUEST_TIMEOUT = float(os.getenv("AI_REQUEST_TIMEOUT", "60"))
-STREAM_TIMEOUT = float(os.getenv("AI_STREAM_TIMEOUT", "300"))
+REQUEST_TIMEOUT = _env_float("AI_REQUEST_TIMEOUT", 60)
+STREAM_TIMEOUT = _env_float("AI_STREAM_TIMEOUT", 300)
 
 # ---------------- 检索相关 ----------------
 
 # 每路召回的候选条数，取并集后再融合
-TOP_K_BM25 = int(os.getenv("AI_TOP_K_BM25", "20"))
-TOP_K_VECTOR = int(os.getenv("AI_TOP_K_VECTOR", "20"))
+TOP_K_BM25 = _env_int("AI_TOP_K_BM25", 20)
+TOP_K_VECTOR = _env_int("AI_TOP_K_VECTOR", 20)
 
 # 最终喂给 LLM 的新闻条数。太多会撑爆上下文且噪声大，太少会丢关键信息
-TOP_K_FINAL = int(os.getenv("AI_TOP_K_FINAL", "5"))
+TOP_K_FINAL = _env_int("AI_TOP_K_FINAL", 5)
 
 # RRF 融合的平滑常数。60 是论文里的经验值：抵消头部排名的过度影响
-RRF_K = int(os.getenv("AI_RRF_K", "60"))
+RRF_K = _env_int("AI_RRF_K", 60)
 
 # 只有一路检索召回的文档，融合得分乘这个系数作为惩罚。
 # 双路召回 = 两路都认为相关；单路召回 = 证据不足，不应被当成可靠答案的依据。
-SINGLE_PATH_WEIGHT = float(os.getenv("AI_SINGLE_PATH_WEIGHT", "0.5"))
+SINGLE_PATH_WEIGHT = _env_float("AI_SINGLE_PATH_WEIGHT", 0.5)
 
 # 召回置信度阈值。**这是次要门控**，见下方 MIN_VECTOR_SIM 的说明。
-MIN_FUSION_SCORE = float(os.getenv("AI_MIN_FUSION_SCORE", "0.02"))
+MIN_FUSION_SCORE = _env_float("AI_MIN_FUSION_SCORE", 0.02)
 
 # 向量 top-1 余弦相似度阈值 —— **主要的拒答判据**。
 #
@@ -71,7 +105,7 @@ MIN_FUSION_SCORE = float(os.getenv("AI_MIN_FUSION_SCORE", "0.02"))
 #      双路命中，分数一律顶到上限 2/(60+1)=0.0328。
 #      这就是原来 MIN_FUSION_SCORE=0.02 形同虚设的原因：
 #      负例误召回率实测 100%，一条都没拦住。
-MIN_VECTOR_SIM = float(os.getenv("AI_MIN_VECTOR_SIM", "0.55"))
+MIN_VECTOR_SIM = _env_float("AI_MIN_VECTOR_SIM", 0.55)
 
 # 向量路不可用时的降级判据：BM25 top-1 分数下限。
 #
@@ -84,19 +118,19 @@ MIN_VECTOR_SIM = float(os.getenv("AI_MIN_VECTOR_SIM", "0.55"))
 #   正例 min 26.63 / 中位 87.14 / max 149.54
 #   负例 min 22.65 / 中位 47.90 / max  60.36
 # 取 40 时负例拒答 50%、正例作答 96%。
-MIN_BM25_SCORE = float(os.getenv("AI_MIN_BM25_SCORE", "40.0"))
+MIN_BM25_SCORE = _env_float("AI_MIN_BM25_SCORE", 40.0)
 
 # 每条新闻最多取多少字进上下文（新闻正文可能很长）
-MAX_DOC_CHARS = int(os.getenv("AI_MAX_DOC_CHARS", "400"))
+MAX_DOC_CHARS = _env_int("AI_MAX_DOC_CHARS", 400)
 
 # 语料索引缓存时间。语料变了就等 TTL 到期或手动清 key
-INDEX_CACHE_TTL = int(os.getenv("AI_INDEX_CACHE_TTL", "3600"))
-EMBEDDING_CACHE_TTL = int(os.getenv("AI_EMBEDDING_CACHE_TTL", "86400"))
+INDEX_CACHE_TTL = _env_int("AI_INDEX_CACHE_TTL", 3600)
+EMBEDDING_CACHE_TTL = _env_int("AI_EMBEDDING_CACHE_TTL", 86400)
 
 # 检索链路 trace：默认写结构化日志；开启后额外按 request_id 落到 Redis，
 # 便于事后回查「为什么这次检索返回了这个结果」。默认关闭是因为它有额外写入开销。
-TRACE_ENABLED = os.getenv("AI_TRACE_ENABLED", "false").lower() == "true"
-TRACE_TTL = int(os.getenv("AI_TRACE_TTL", "3600"))
+TRACE_ENABLED = _env_str("AI_TRACE_ENABLED", "false").lower() == "true"
+TRACE_TTL = _env_int("AI_TRACE_TTL", 3600)
 
 
 def is_configured() -> bool:
@@ -113,3 +147,21 @@ def auth_headers(stream: bool = False) -> dict:
     if stream:
         headers["X-DashScope-SSE"] = "enable"
     return headers
+
+
+# ---------------- 上下文缓存 ----------------
+
+# 百炼隐式缓存的最小可缓存前缀是 1024 token，低于这个长度必然不命中。
+# 实测（deepseek-v4-flash-0731）：前缀 1156 token 时第 2 次请求起
+# cached_tokens=1024，命中率 88.6%；前缀 127 token 时命中率恒为 0%。
+#
+# 我们的真实请求里 system prompt 约 200 token、检索上下文约 700 token，
+# 合计通常**低于** 1024 —— 所以短期内不会命中。这不是配置问题，是模型
+# 侧的硬门槛：百炼不做显式缓存的话，前缀太短就没有收益。
+#
+# 结论：当前规模下不为缓存做优化，等语料或 prompt 变长（>1024 token 前缀）
+# 自然开始生效。这里记录实测数字，避免后来人重复试错。
+CACHE_MIN_PREFIX_TOKENS = 1024
+
+# 实测能命中缓存的前缀长度下，缓存部分按输入单价 20% 计费（百炼部署的模型）
+CACHE_DISCOUNT_RATIO = 0.2
