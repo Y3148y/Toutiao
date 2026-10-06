@@ -68,9 +68,12 @@ jobs:
 
       - name: Import app and verify routes
         run: |
-          python -c "
+          python - <<'PY'
           import main
-          paths = main.app.openapi()['paths']
-          assert len(paths) == 19, f'期望 19 条路由，实际 {len(paths)}'
-          print(f'OK: {len(paths)} paths')
-          "
+          paths = main.app.openapi()["paths"]
+          # 数量断言放在脚本文件里而不是 python -c 的内联字符串：
+          # 内联多行引号在 YAML 与 shell 之间容易出错，排查困难。
+          expected = 22
+          assert len(paths) == expected, f"期望 {expected} 条路由，实际 {len(paths)}"
+          print(f"OK: {len(paths)} paths")
+          PY
