@@ -163,10 +163,21 @@ def test_vector_matrix_orthogonal_scores_zero():
 
 
 def test_vector_matrix_rejects_dimension_mismatch():
+    """
+    维度不匹配必须明确报出「谁和谁」以及可能原因。
+
+    之前只说「维度不一致」，而调用方在 except 里会把它降级成
+    「向量检索不可用」，日志上看像网络或服务故障，实际是模型换了。
+    """
     m = VectorMatrix([[1.0] * DIM])
 
-    with pytest.raises(ValueError, match="维度"):
+    with pytest.raises(ValueError) as exc:
         m.search([1.0] * (DIM * 2), top_k=1)
+
+    message = str(exc.value)
+    assert str(DIM * 2) in message, "应报出查询向量的实际维度"
+    assert str(DIM) in message, "应报出索引的实际维度"
+    assert "模型" in message, "应提示可能更换了 embedding 模型"
 
 
 def test_vector_matrix_normalizes_non_unit_input():
@@ -253,7 +264,17 @@ def test_fingerprint_stable_for_same_corpus():
 
 
 def test_fingerprint_handles_empty():
-    assert _corpus_fingerprint([]) == "empty"
+    """
+    空语料的指纹应稳定（同样输入得到同样输出），且与非空语料不同。
+
+    具体格式由 corpus_fingerprint 决定，这里不硬编码字符串 ——
+    格式变了这个测试会假失败，而它真正要守的是「稳定性」和「可区分」。
+    """
+    from ai.ingest.validate import corpus_fingerprint
+
+    empty_fp = _corpus_fingerprint([])
+    assert empty_fp == corpus_fingerprint([])
+    assert empty_fp != _corpus_fingerprint(make_corpus(5))
 
 
 # ---------------------------------------------------------------- 向量缓存

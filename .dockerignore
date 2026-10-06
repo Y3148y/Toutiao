@@ -25,6 +25,10 @@ tests/
 pytest.ini
 test_main.http
 
+# 离线索引产物：镜像里运行时构建，或挂载进来
+ai/ingest/index/
+ai/ingest/snapshots/
+
 # Docker 自身文件
 Dockerfile
 .dockerignore

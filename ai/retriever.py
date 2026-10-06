@@ -61,6 +61,8 @@ from ai.config import (
     TRACE_TTL,
 )
 from ai.embeddings import VectorMatrix, embed_query, embed_texts
+from ai.ingest.manifest import IndexManifest
+from ai.ingest.validate import corpus_fingerprint
 from config.cache_conf import redis_client
 from models.news import News
 from utils.logging_conf import get_logger
@@ -277,8 +279,11 @@ async def vector_search(
     """
     向量语义检索，返回 [(新闻下标, 余弦相似度)]，按相似度降序。
 
-    语料向量矩阵随语料一起缓存，避免每次查询都重新读取 403 条向量
+    语料向量矩阵随语料缓存，避免每次查询都重新读取 403 条向量
     （实测逐条 GET 是 404 次往返 / 1497ms）。
+
+    优先使用离线构建的索引（ai/ingest），它是显式构建产物，
+    省去运行时拼装向量矩阵的开销，且带 manifest 可校验兼容性。
 
     向量化失败时返回空列表并降级为纯 BM25 —— 语义检索是增强项，
     不该因为它挂了就让整个问答不可用。
@@ -286,25 +291,74 @@ async def vector_search(
     if not corpus:
         return []
 
+    # 查询向量必须先拿到：它只有一条，缓存价值低但必须有
     try:
-        matrix = await get_corpus_vector_matrix(corpus)
         query_vector = await embed_query(query)
+    except Exception as exc:
+        logger.warning("查询向量化失败，降级为纯 BM25: %s", exc)
+        return []
+
+    # 1) 离线索引
+    offline = await _load_offline_index(corpus)
+    if offline is not None:
+        try:
+            return offline.search(query_vector, top_k)
+        except ValueError as exc:
+            logger.warning("离线索引维度不匹配，回退到运行时构建: %s", exc)
+
+    # 2) 运行时构建（语料首次被检索时懒加载）
+    try:
+        runtime_matrix = await get_corpus_vector_matrix(corpus)
+        return runtime_matrix.search(query_vector, top_k)
     except Exception as exc:
         logger.warning("向量检索不可用，降级为纯 BM25: %s", exc)
         return []
 
+
+async def _load_offline_index(corpus: list[News]):
+    """
+    加载离线构建的索引，并校验它对当前语料与模型是否仍然有效。
+
+    三重校验，缺一不可：
+    1. 语料指纹一致 —— 语料变了索引就是旧的
+    2. embedding 模型一致 —— 换了模型旧向量不可用
+    3. 矩阵行数与 news_ids 一致 —— 兜底，防止文件被部分覆盖导致错位
+
+    任一项不满足就返回 None，由调用方回退到运行时构建路径。
+    """
+    from ai.config import DASHSCOPE_EMBED_MODEL
+    from ai.ingest.storage import load_manifest_file, load_matrix_file
+
     try:
-        return matrix.search(query_vector, top_k)
-    except ValueError as exc:
-        # 维度不一致通常意味着换了 embedding 模型但语料缓存还在
-        logger.warning("向量维度不一致，清缓存后重试一次: %s", exc)
-        try:
-            await invalidate_corpus_index()
-            matrix = await get_corpus_vector_matrix(corpus, force_rebuild=True)
-            return matrix.search(query_vector, top_k)
-        except Exception as retry_exc:
-            logger.warning("重建语料向量后仍失败，降级为纯 BM25: %s", retry_exc)
-            return []
+        stored = load_matrix_file()
+    except Exception as exc:
+        logger.debug("读取离线索引失败: %s", exc)
+        return None
+
+    if stored is None:
+        return None
+
+    matrix, news_ids, fingerprint = stored
+    if not len(matrix) or len(matrix) != len(news_ids):
+        logger.info("离线索引行数与 id 数不一致，视为损坏并回退")
+        return None
+
+    current_fp = _corpus_fingerprint(corpus)
+    if fingerprint and fingerprint != current_fp:
+        logger.info("离线索引语料指纹已过期（%s != %s），回退到运行时构建", fingerprint, current_fp)
+        return None
+
+    manifest_data = load_manifest_file()
+    if manifest_data:
+        manifest = IndexManifest.from_dict(manifest_data)
+        compatible, reason = manifest.is_compatible_with(DASHSCOPE_EMBED_MODEL, matrix.dim)
+        if not compatible:
+            logger.info("离线索引不可用：%s，回退到运行时构建", reason)
+            return None
+
+    logger.debug("使用离线索引：%s 篇，维度 %s", len(matrix), matrix.dim)
+    return matrix
+
 
 
 def get_bm25_index(corpus: list[News]):
@@ -348,14 +402,10 @@ def _corpus_fingerprint(corpus: list[News]) -> str:
     """
     语料指纹：内容变化才会导致缓存失效。
 
-    用 (条数, 首尾 id, 首尾标题) 而不是全文 hash —— 全文 hash 403 条要几十毫秒，
-    反而抵消了缓存收益；而新闻一旦变动通常会新增或改标题，首尾足以反映变化。
+    与 ai.ingest 的 corpus_fingerprint 是同一个算法 —— 两边必须一致，
+    否则检索侧永远认为离线索引已过期，离线构建就白做了。
     """
-    if not corpus:
-        return "empty"
-    head = corpus[0]
-    tail = corpus[-1]
-    return f"{len(corpus)}:{head.id}:{head.title[:20]}:{tail.id}:{tail.title[:20]}"
+    return corpus_fingerprint(corpus)
 
 
 async def get_corpus_vector_matrix(corpus: list[News], force_rebuild: bool = False):

@@ -7,5 +7,9 @@ venv/
 # 敏感配置：只提交 .env.example
 .env
 
+# 离线索引产物：由 python -m ai.ingest.cli build 生成，不进版本库
+ai/ingest/index/
+ai/ingest/snapshots/
+
 .idea/
 .vscode/

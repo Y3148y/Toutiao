@@ -243,24 +243,40 @@ class VectorMatrix:
     可以直接换掉内部实现，调用方无需改动。
     """
 
-    def __init__(self, vectors: list[list[float]]):
+    def __init__(self, vectors):
         import numpy as np
 
-        self._np = np
-        if not vectors:
+        if isinstance(vectors, np.ndarray):
+            # 直接接管 numpy 数组，避免 from_numpy.array 再拷贝一份。
+            # 离线构建从 .npy 读出时走这条路径，省掉一次几 MB 的内存拷贝。
+            array = vectors
+            if array.dtype != np.float32:
+                array = array.astype(np.float32)
+        elif not vectors:
+            self._np = np
             self._matrix = np.zeros((0, 0), dtype=np.float32)
             self._norms = np.zeros((0,), dtype=np.float32)
             return
+        else:
+            array = np.asarray(vectors, dtype=np.float32)
 
-        matrix = np.asarray(vectors, dtype=np.float32)
-        if matrix.ndim != 2:
-            raise ValueError(f"向量维度不正确: shape={matrix.shape}")
+        self._np = np
+        if array.ndim != 2:
+            raise ValueError(f"向量维度不正确: shape={array.shape}")
 
         # 显式归一化：让点积等于余弦。零向量用 1.0 兜底避免除零产生 nan
-        norms = np.linalg.norm(matrix, axis=1)
+        norms = np.linalg.norm(array, axis=1)
         safe_norms = np.where(norms > 0, norms, 1.0)
-        self._matrix = matrix / safe_norms[:, None]
+        self._matrix = array / safe_norms[:, None]
         self._norms = norms
+
+    def to_numpy(self):
+        """导出归一化后的矩阵，供持久化为 .npy"""
+        return self._matrix
+
+    def row(self, index: int) -> list[float]:
+        """取第 index 行（已归一化），用于增量构建时复用单篇向量"""
+        return [float(x) for x in self._matrix[index]]
 
     def __len__(self) -> int:
         return int(self._matrix.shape[0])
@@ -268,6 +284,15 @@ class VectorMatrix:
     @property
     def dim(self) -> int:
         return int(self._matrix.shape[1]) if len(self) else 0
+
+    def to_list(self) -> list[list[float]]:
+        """
+        导出为普通 list，供序列化到 Redis 或 JSON。
+
+        转成 float 而非保留 float32：JSON 只能存文本，
+        float32 还原成 Python float 是双精度，精度更高但完全兼容。
+        """
+        return [[float(x) for x in row] for row in self._matrix]
 
     def search(self, query: list[float], top_k: int) -> list[tuple[int, float]]:
         """
@@ -278,7 +303,13 @@ class VectorMatrix:
 
         q = self._np.asarray(query, dtype=self._matrix.dtype)
         if q.shape[0] != self.dim:
-            raise ValueError(f"查询向量维度 {q.shape[0]} 与语料维度 {self.dim} 不一致")
+            # 这条错误信息必须说清楚「谁和谁不匹配」——
+            # 调用方通常在 except 里把它降级成「向量服务不可用」，
+            # 报错含糊会让排查时误以为是网络或服务问题，而实际是模型换了。
+            raise ValueError(
+                f"查询向量维度 {q.shape[0]} 与索引维度 {self.dim} 不一致"
+                f"（可能更换了 embedding 模型，需重建索引或清理向量缓存）"
+            )
 
         q_norm = float(self._np.linalg.norm(q))
         if q_norm > 0:

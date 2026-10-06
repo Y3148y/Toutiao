@@ -67,6 +67,12 @@ toutiao_backend/
 │   ├── retriever.py           # 混合检索 + RRF 融合 + 索引缓存 + 链路追踪
 │   ├── prompts.py             # 带约束的 prompt 与拒答文案
 │   ├── news_qa.py             # 新闻问答接口（SSE 流式 + 溯源）
+│   ├── ingest/                # 离线索引管线
+│   │   ├── validate.py        # 语料校验 + 内容指纹
+│   │   ├── manifest.py        # 索引版本管理（兼容性判定）
+│   │   ├── builder.py         # 构建/增量/断点续跑
+│   │   ├── storage.py         # 落盘（.npy 向量 + JSON 元信息）
+│   │   └── cli.py             # 命令行入口
 │   └── eval/                  # 检索质量评估
 │       ├── dataset.jsonl      # 55 条评估集（含难例与负例）
 │       ├── runner.py          # 6 个指标 + 参数网格扫描
@@ -85,6 +91,8 @@ toutiao_backend/
 │   ├── test_retrieval.py      # 分词、BM25、RRF 融合、prompt、防幻觉约束
 │   ├── test_retrieval_perf.py # 检索性能回归哨兵 + 缓存行为
 │   ├── test_retrieval_trace.py# 链路追踪写入（含 await 缺失的回归测试）
+│   ├── test_ingest.py         # 语料校验、索引版本、增量更新、断点续跑
+│   ├── test_ingest_integration.py # 离线索引与在线检索的衔接与校验
 │   └── test_rag_quality.py    # 召回率与误召回率 CI 门禁
 ├── resourse/                   # 资源文件
 │   └── database.sql           # 数据库初始化脚本（含 50+ 条种子数据）
@@ -264,7 +272,47 @@ top1    : id=44 score=0.008197 bm25=1 vec=None single=True terms=['高铁']
 redis-cli -n 3 GET "ai:trace:<request_id>"
 ```
 
-### 检索质量评估
+### 离线索引管线
+
+显式构建流程，与检索时的懒加载并存。见 `ai/ingest/`：
+
+```bash
+python -m ai.ingest.cli validate                      # 只做语料校验，看脏数据
+python -m ai.ingest.cli build --model text-embedding-v4   # 构建/增量更新
+python -m ai.ingest.cli index-status                   # 查看索引落盘状态与兼容性
+python -m ai.ingest.cli snapshots                      # 历史版本，可用于回滚
+python -m ai.ingest.cli clear                          # 清空索引
+```
+
+**实测效果**（403 篇 × 1024 维）：
+
+| 场景 | 向量化 | 复用 | API 调用 | 耗时 |
+|---|---|---|---|---|
+| 全量构建 | 403 | 0 | 403 | 2793ms |
+| 内容不变 | 0 | 403 | **0** | — |
+| 改 1 篇 | **1** | 402 | **1** | **428ms** |
+| 换 embedding 模型 | 403 | 0 | 403 | 全量重建 |
+
+四个设计要点：
+
+- **索引版本（manifest）**：记录 embedding 模型、维度、语料指纹、文档数。
+  换模型或语料变化时可立即判定失效 —— 维度不一致只会在检索时报 `index out of range`，
+  很难联想到是模型换了。有了 manifest 还能回滚到历史版本。
+- **增量更新**：按内容 hash 只处理变更文档。hash 只覆盖参与检索的字段
+  （标题/描述/正文），改分类不触发重新向量化。
+- **断点续跑**：进度存文件而非 Redis。中途失败重跑只处理未完成的部分。
+  进度与本次待处理无交集时判定为陈旧并清除，避免把所有文档误判为已完成。
+- **文件为准，Redis 为快路径**：Redis 不可用时索引产物依然可用。
+  这条是被实测逼出来的 —— 最初把 manifest 只存 Redis，结果 Redis 一挂，
+  增量判定全部失效，403 篇被重新向量化一次。
+
+**数据层的坑**：真实语料里有 15 组共 33 篇**标题、描述、正文完全相同**的重复新闻
+（如 id 22 与 116）。用 `hash -> 单个 id` 做映射会让后写入的覆盖先写入的，
+那 33 篇永远进不了索引且没有任何报错。所以映射的值是 id 列表。
+
+> **当前语料不做 chunking**：实测正文最长 192 字符、中位数 126，
+> 全部是单段短新闻，一篇就是一个 chunk。分块策略（parent-child、重叠窗口）
+> 在这个规模没有实际价值，等语料形态变化时再引入。
 
 已建成评估体系（55 条评估集 + 6 个指标 + 参数扫描 + CI 门禁），当前基线：
 
@@ -557,6 +605,7 @@ pytest -q
 - **检索**：中文分词的单字/二元组、BM25 专名精确匹配、单字噪声过滤、RRF 融合数学、单路命中惩罚、余弦零向量保护
 - **性能回归哨兵**：BM25 < 25ms、向量 < 5ms、缓存必须命中且不得无界增长
 - **链路追踪**：trace 落 Redis、`request_id` 关联、TTL 正确、降级模式被标记、写失败不影响主流程
+- **离线索引**：语料脏数据拦截、索引兼容性判定、增量只处理变更文档、断点续跑、重复文档不丢失
 - **防幻觉**：SSE 溯源事件可 JSON 序列化（datetime 边界处理）、拒答文案包含已检索到的报道、system prompt 约束存在性
 - **接口契约**：所有接口返回 `code`/`message`/`data`，响应体中不再出现 `msg`
 
