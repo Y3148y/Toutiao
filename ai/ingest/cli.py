@@ -17,6 +17,7 @@ import json
 import sys
 from pathlib import Path
 
+from ai import config as ai_config
 from ai.config import DASHSCOPE_EMBED_MODEL
 from ai.ingest.builder import build_index
 from ai.ingest.manifest import IndexManifest, load_manifest, list_snapshots
@@ -128,6 +129,9 @@ async def cmd_build(args) -> int:
         docs,
         previous=previous,
         embed_model=args.model,
+        # 显式传维度，让「同模型换维度」也能触发失效判定。
+        # 测试里用假向量时故意不传，避免固定维度的假数据被误判为变更。
+        embed_dim=ai_config.DASHSCOPE_EMBED_DIM,
         resume=not args.no_resume,
         strict=args.strict,
     )
@@ -230,6 +234,56 @@ def cmd_clear(args) -> int:
     return 0
 
 
+async def cmd_cost(args) -> int:
+    """打印累计 token 用量与预估花费"""
+    from ai.config import BUDGET_ASK_CNY, BUDGET_TOTAL_CNY
+    from ai.cost import get_usage, reset_usage
+
+    if args.reset:
+        await reset_usage()
+        print("计量已清零")
+        return 0
+
+    usage = await get_usage()
+    if not usage:
+        print("尚无计量记录（Redis 不可用或还没有调用过模型）")
+        return 0
+
+    total = usage.pop("total_cny", 0.0)
+    # 6 位小数：embedding 一次全量重建约 0.04 元，单篇增量约 0.0001 元，
+    # 用 4 位小数会把最需要被看见的量显示成 0.0000
+    print("累计预估花费: 元%.6f" % total)
+    print()
+    print(f"{'模型':<32}{'输入':>12}{'输出':>10}{'缓存命中':>12}")
+
+    # 先按模型归组再打印。直接遍历扁平 hash 会串列 ——
+    # embedding 只有 in 字段，没有 out，逐行拼接收尾符的写法会错位。
+    grouped: dict[str, dict[str, float]] = {}
+    for field_name, value in usage.items():
+        model, kind = field_name.rsplit(":", 1)
+        grouped.setdefault(model, {})[kind] = value
+
+    for model, kinds in sorted(grouped.items()):
+        print(
+            f"{model:<32}"
+            f"{int(kinds.get('in', 0)):>12}"
+            f"{int(kinds.get('out', 0)):>10}"
+            f"{int(kinds.get('cached', 0)):>12}"
+        )
+
+    print()
+    limit = BUDGET_TOTAL_CNY
+    if limit > 0:
+        pct = 100 * total / limit
+        print(f"预算上限 元{limit:.2f}，已用 {pct:.1f}%")
+        if total > limit:
+            print("已超预算，AI 接口会拒绝继续调用")
+    else:
+        print("未设置预算上限（AI_BUDGET_TOTAL_CNY）。生产环境建议设置。")
+    print(f"单次问答上限 元{BUDGET_ASK_CNY:.4f}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="RAG 离线索引管理")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -262,6 +316,12 @@ def main() -> int:
 
     p_clear = sub.add_parser("clear", help="清空离线索引")
     p_clear.set_defaults(func=cmd_clear)
+
+    p_cost = sub.add_parser("cost", help="查看累计 token 用量与预估花费")
+    p_cost.add_argument(
+        "--reset", action="store_true", help="清零计量，重新开始统计"
+    )
+    p_cost.set_defaults(func=lambda args: asyncio.run(cmd_cost(args)))
 
     args = parser.parse_args()
     return args.func(args)

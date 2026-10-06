@@ -61,6 +61,39 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _record_chat_usage(usage: dict | None) -> None:
+    """
+    把一次问答的 token 用量计入成本闸门。
+
+    DeepSeek 系模型普通输入 ¥1/M 是缓存命中价 ¥0.2/M 的 5 倍，
+    而 system prompt 每次请求都完全相同 —— 缓存命中率直接决定成本。
+    所以把 cached_tokens 单独记下来，缓存没生效时能立刻看出来。
+    """
+    if not usage:
+        return
+    from ai.cost import BudgetExceeded, record_usage
+
+    details = usage.get("prompt_tokens_details") or {}
+    try:
+        snap = await record_usage(
+            DASHSCOPE_CHAT_MODEL,
+            input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0),
+            cached_input_tokens=int(details.get("cached_tokens") or 0),
+        )
+    except BudgetExceeded as exc:
+        # 已超预算。这次调用的钱已经付了，但继续服务只会越欠越多，
+        # 明确返回 429 让调用方知道是预算问题而不是服务故障。
+        logger.error("预算超限: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+        ) from exc
+
+    logger.info(
+        "问答计量 %s 缓存命中率 %.0f%%", snap.describe(), snap.cache_hit_ratio * 100
+    )
+
+
 @router.post("/news-qa")
 async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
     """
@@ -129,6 +162,9 @@ async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db))
                             yield _sse("token", {"content": content})
                         finish_reason = choices[0].get("finish_reason")
                         if finish_reason:
+                            # 流式的 usage 只在最后一帧出现，
+                            # 在这里计量而不是每个 token 都算一遍
+                            await _record_chat_usage(parsed.get("usage"))
                             yield _sse(
                                 "done",
                                 {
@@ -197,12 +233,15 @@ async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
     if choices:
         answer = (choices[0].get("message") or {}).get("content", "")
 
+    usage = data.get("usage")
+    await _record_chat_usage(usage)
+
     return success_response(
         data={
             "answer": answer,
             "refused": False,
             "sources": [item.to_citation() for item in retrieved],
-            "usage": data.get("usage"),
+            "usage": usage,
         }
     )
 

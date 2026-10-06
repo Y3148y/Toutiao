@@ -278,7 +278,7 @@ redis-cli -n 3 GET "ai:trace:<request_id>"
 
 ```bash
 python -m ai.ingest.cli validate                      # 只做语料校验，看脏数据
-python -m ai.ingest.cli build --model text-embedding-v4   # 构建/增量更新
+python -m ai.ingest.cli build --model qwen3.7-text-embedding   # 构建/增量更新
 python -m ai.ingest.cli index-status                   # 查看索引落盘状态与兼容性
 python -m ai.ingest.cli snapshots                      # 历史版本，可用于回滚
 python -m ai.ingest.cli clear                          # 清空索引
@@ -536,8 +536,8 @@ export RATE_LIMIT_RATE=100       # 每秒补充令牌数，决定长期平均速
 
 # AI 大模型（可选，不配置则 /api/ai/* 返回 500）
 export DASHSCOPE_API_KEY=sk-xxxx
-export DASHSCOPE_MODEL=qwen-plus
-export DASHSCOPE_EMBED_MODEL=text-embedding-v4
+export DASHSCOPE_MODEL=deepseek-v4-flash-0731
+export DASHSCOPE_EMBED_MODEL=qwen3.7-text-embedding
 
 # 新闻问答检索参数
 export AI_TOP_K_BM25=20          # BM25 每路召回条数
@@ -545,7 +545,9 @@ export AI_TOP_K_VECTOR=20        # 向量每路召回条数
 export AI_TOP_K_FINAL=5# 喂给 LLM 的新闻条数
 export AI_RRF_K=60                # RRF 平滑常数
 export AI_SINGLE_PATH_WEIGHT=0.5  # 单路命中惩罚系数
-export AI_MIN_FUSION_SCORE=0.02   # 低于此分判定为无相关报道，直接拒答
+export AI_MIN_VECTOR_SIM=0.55    # 置信门控（主判据）：向量 top-1 余弦下限
+export AI_MIN_BM25_SCORE=40.0   # 降级判据：向量路不可用时改用 BM25 分数
+export AI_MIN_FUSION_SCORE=0.02  # 兜底判据：RRF 融合分（实测无区分度，仅保底）
 export AI_MAX_DOC_CHARS=400       # 每条新闻最多取多少字进上下文
 export AI_TRACE_ENABLED=false     # 开启后按 request_id 把检索链路落到 Redis
 ```

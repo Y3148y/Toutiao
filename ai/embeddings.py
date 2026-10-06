@@ -24,6 +24,7 @@ import httpx
 
 from ai.config import (
     DASHSCOPE_BASE_URL,
+    DASHSCOPE_EMBED_DIM,
     DASHSCOPE_EMBED_MODEL,
     EMBEDDING_CACHE_TTL,
     REQUEST_TIMEOUT,
@@ -38,10 +39,31 @@ _EMBEDDING_CACHE_PREFIX = "ai:embed:"
 _BATCH_SIZE = 10
 
 
-def _cache_key(text: str, model: str) -> str:
-    """按内容 hash 生成缓存 key。文本或模型变了 key 就会变。"""
-    digest = hashlib.sha256(f"{model}::{text}".encode("utf-8")).hexdigest()
+def _cache_key(text: str, model: str, dim: int | None = None) -> str:
+    """
+    按内容 hash 生成缓存 key。
+
+    **模型名和维度都必须进 key。** 只用文本做 key 时，
+    换了 embedding 模型或维度，缓存里的旧向量会被当成新向量返回 ——
+    两者维度可能恰好相同所以不报错，但语义空间完全不同，
+    检索结果会静默崩坏，没有任何异常可查。
+    """
+    if dim is None:
+        from ai.config import DASHSCOPE_EMBED_DIM as dim  # noqa: N813
+    digest = hashlib.sha256(f"{model}:{dim}::{text}".encode("utf-8")).hexdigest()
     return f"{_EMBEDDING_CACHE_PREFIX}{digest}"
+
+
+def index_signature(model: str, dim: int | None = None) -> str:
+    """
+    索引签名，写进 manifest。
+
+    检索时用它判断「磁盘上的向量是不是当前模型+维度算出来的」。
+    只比模型名不够 —— 同模型换维度也算换了。
+    """
+    if dim is None:
+        from ai.config import DASHSCOPE_EMBED_DIM as dim  # noqa: N813
+    return f"{model}@{dim}"
 
 
 async def _get_cached_embedding(text: str) -> list[float] | None:
@@ -68,7 +90,14 @@ async def _set_cached_embedding(text: str, vector: list[float]) -> None:
 
 
 async def _call_embedding_api(texts: list[str]) -> list[list[float]]:
-    """调用 DashScope /embeddings 接口。分批发送避免超长请求。"""
+    """
+    调用 DashScope /embeddings 接口。分批发送避免超长请求。
+
+    从响应的 usage 里读真实 token 数并计入成本闸门 ——
+    账单数字来自 API 返回值，不是估算，这样才对得上。
+    """
+    from ai.cost import record_usage
+
     vectors: list[list[float]] = []
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         for start in range(0, len(texts), _BATCH_SIZE):
@@ -80,6 +109,11 @@ async def _call_embedding_api(texts: list[str]) -> list[list[float]]:
                     "model": DASHSCOPE_EMBED_MODEL,
                     "input": batch,
                     "encoding_format": "float",
+                    **(
+                        {"dimensions": DASHSCOPE_EMBED_DIM}
+                        if DASHSCOPE_EMBED_DIM
+                        else {}
+                    ),
                 },
             )
             resp.raise_for_status()
@@ -87,6 +121,22 @@ async def _call_embedding_api(texts: list[str]) -> list[list[float]]:
             # 返回顺序按 index 排，data 里带 index 字段，不能直接 append
             items = sorted(payload["data"], key=lambda item: item["index"])
             vectors.extend(item["embedding"] for item in items)
+
+            used = (payload.get("usage") or {}).get("total_tokens")
+            if used:
+                snap = await record_usage(DASHSCOPE_EMBED_MODEL, input_tokens=int(used))
+                logger.debug("embedding 计量: %s", snap.describe())
+
+            for item in items:
+                got = len(item["embedding"])
+                if got != DASHSCOPE_EMBED_DIM:
+                    # 维度不符必须硬失败。静默接受会让下游查询向量报
+                    # 「维度不一致」，而排查方向会错误地指向「向量服务故障」。
+                    raise ValueError(
+                        f"{DASHSCOPE_EMBED_MODEL} 返回维度 {got}，"
+                        f"与配置的 {DASHSCOPE_EMBED_DIM} 不符。"
+                        "确认 AI_EMBED_DIM 设置，或该模型是否被服务商调整"
+                    )
     return vectors
 
 
@@ -142,6 +192,18 @@ async def embed_texts(
 
     if any(v is None for v in vectors):
         raise ValueError("部分文本向量化失败")
+
+    # 缓存路径也要验维度。
+    # 只在 API 返回处校验是不够的：改了 AI_EMBED_DIM 之后，如果缓存里还留着
+    # 旧维度的向量（key 已含维度，理论上不会命中，但缓存可能被外部写入或手工改过），
+    # 1024 维向量混进 512 维矩阵会让检索结果错乱且不报错。
+    bad = [len(v) for v in vectors if len(v) != DASHSCOPE_EMBED_DIM]  # type: ignore[arg-type]
+    if bad:
+        raise ValueError(
+            f"向量维度不一致：期望 {DASHSCOPE_EMBED_DIM}，实际出现 {sorted(set(bad))}。"
+            "多为切换 embedding 模型/维度后残留的旧缓存，清缓存后重建："
+            "redis-cli --scan --pattern 'ai:embed:*' | xargs redis-cli DEL"
+        )
     return vectors  # type: ignore[return-value]
 
 

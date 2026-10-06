@@ -30,6 +30,7 @@
    指标里会明确显示，用来定位性能瓶颈。
 """
 import argparse
+import asyncio
 import io
 import json
 import os
@@ -86,6 +87,8 @@ class CaseResult:
     fusion_scores: dict[int, float] = field(default_factory=dict)
     top_score: float = 0.0
     answered: bool = False
+    # 本次用的置信判据：vector_cosine / bm25_score / rrf
+    gate_mode: str = "rrf"
     timing: StageTiming = field(default_factory=StageTiming)
 
     def rank_of_first_gold(self) -> int | None:
@@ -216,7 +219,38 @@ def positive_answer_rate(results: list[CaseResult]) -> float:
 # ---------------------------------------------------------------- 检索执行
 
 
-def run_retrieval(
+_corpus_vector_cache: dict[str, list[list[float]]] = {}
+
+
+def _documents_digest(documents: list[str]) -> str:
+    """对已拼装的文档文本做摘要，用于缓存键。"""
+    import hashlib
+
+    h = hashlib.sha256()
+    for d in documents:
+        h.update(d.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
+async def _corpus_vectors(documents: list[str], vector_mode: str) -> list[list[float]]:
+    """
+    取语料向量，按「语料内容 + 模式」缓存。
+
+    一轮评估里 55 条用例共享同一份 403 条语料。逐用例重取是纯浪费：
+    55 × 403 = 22115 次 Redis 往返，实测让向量段单条耗时 2370ms、总评估 131 秒。
+    缓存后向量段降到毫秒级。
+    """
+    key = f"{vector_mode}::{_documents_digest(documents)}"
+    hit = _corpus_vector_cache.get(key)
+    if hit is not None:
+        return hit
+    vectors = await embed_texts(documents, batch_lookup=True)
+    _corpus_vector_cache[key] = vectors
+    return vectors
+
+
+async def run_retrieval(
     corpus: list[News],
     case: EvalCase,
     top_k: int,
@@ -247,6 +281,8 @@ def run_retrieval(
 
     # --- 向量 ---
     vector_rank: dict[int, int] = {}
+    vector_hits_map: dict[int, float] = {}
+    vector_sim_min: float = ai_config.MIN_VECTOR_SIM
     if vector_mode != "none":
         t0 = time.perf_counter()
         try:
@@ -257,17 +293,24 @@ def run_retrieval(
                 doc_vectors = fake_vectors(documents)
                 query_vector = fake_vectors([case.question])[0]
             else:
-                doc_vectors = embed_texts_sync(documents)
-                query_vector = embed_query_sync(case.question)
+                # 语料向量在所有用例之间完全相同，只取一次。
+                # 原来每条用例都 embed_texts(403 条)：55 × 403 次 Redis 往返，
+                # 向量段耗时 2370ms/条，总评估 131 秒。
+                doc_vectors = await _corpus_vectors(documents, vector_mode)
+                query_vector = await embed_query(case.question)
 
-            scored = [
-                (i, cosine_similarity(query_vector, v)) for i, v in enumerate(doc_vectors)
-            ]
-            scored.sort(key=lambda pair: pair[1], reverse=True)
-            vector_rank = {
-                i: r + 1 for r, (i, _) in enumerate(scored[: ai_config.TOP_K_VECTOR])
-            }
-        except Exception:
+            from ai.embeddings import VectorMatrix
+
+            matrix = VectorMatrix(doc_vectors)
+            hits = matrix.search(query_vector, ai_config.TOP_K_VECTOR)
+            vector_rank = {idx: r + 1 for r, (idx, _) in enumerate(hits)}
+            # 余弦相似度要留给置信门控用，不能只留排名
+            vector_hits_map = {idx: float(s) for idx, s in hits}
+        except Exception as exc:
+            # 曾经这里是 except Exception: vector_rank = {}，静默退化成纯 BM25。
+            # 结果是「真实向量评估」跑出来的数字其实和 BM25 单路一模一样，
+            # 却看不出来 —— 静默降级让评估结论完全失效。
+            print(f"  [警告] 用例 {case.id} 的向量路失败，本次按纯 BM25 计算: {exc}")
             vector_rank = {}
         timing.vector = (time.perf_counter() - t0) * 1000
 
@@ -287,7 +330,23 @@ def run_retrieval(
     result.retrieved_ids = [corpus[i].id for i, _ in ordered]
     result.fusion_scores = {corpus[i].id: s for i, s in ordered}
     result.top_score = ordered[0][1] if ordered else 0.0
-    result.answered = result.top_score >= min_score
+
+    # 置信判据与线上 ai.retriever.retrieve 保持一致：向量余弦 -> BM25 分数 -> RRF。
+    # 两边算法不一致的话，评估结论就不能代表线上行为，这个评估本身就没意义。
+    # bm25_hits 的元素是 (语料下标, 分数, 命中词)，分数在第二个位置
+    top_bm25 = max((h[1] for h in bm25_hits), default=None)
+    if vector_hits_map:
+        best_sim = max(vector_hits_map.values())
+        result.answered = best_sim >= vector_sim_min
+        result.top_score = best_sim
+        result.gate_mode = "vector_cosine"
+    elif top_bm25 is not None:
+        result.answered = top_bm25 >= ai_config.MIN_BM25_SCORE
+        result.top_score = top_bm25
+        result.gate_mode = "bm25_score"
+    else:
+        result.answered = result.top_score >= min_score
+        result.gate_mode = "rrf"
     timing.fuse = (time.perf_counter() - t0) * 1000
     result.timing = timing
 
@@ -311,18 +370,6 @@ def _rrf(ranked_lists: list[list[int]], k: int, single_path_weight: float) -> di
             if count < total:
                 scores[idx] *= single_path_weight
     return scores
-
-
-def embed_texts_sync(texts: list[str]) -> list[list[float]]:
-    import asyncio
-
-    return asyncio.run(embed_texts(texts))
-
-
-def embed_query_sync(text: str) -> list[float]:
-    import asyncio
-
-    return asyncio.run(embed_query(text))
 
 
 # ---------------------------------------------------------------- 数据加载
@@ -474,7 +521,7 @@ def print_misfires(results: list[CaseResult], limit: int = 10) -> None:
 # ---------------------------------------------------------------- 参数扫描
 
 
-def sweep(
+async def sweep(
     corpus: list[News],
     cases: list[EvalCase],
     k: int = 5,
@@ -486,7 +533,12 @@ def sweep(
     只输出数据不做选择 —— 阈值该定在哪取决于业务对「错答案」和「没答案」
     的相对代价，那是产品决策不是技术决策。
     """
-    score_grid = [0.004, 0.008, 0.012, 0.016, 0.020, 0.025, 0.030, 0.040]
+    # 扫描点覆盖「单路最高分 0.008」到「双路最高分 0.033」，
+    # 并向上延伸以观察召回开始明显掉的位置。
+    score_grid = [
+        0.002, 0.004, 0.006, 0.008, 0.010, 0.012, 0.015,
+        0.018, 0.020, 0.022, 0.025, 0.028, 0.030, 0.033, 0.040,
+    ]
     k_grid = [3, 5, 8]
     rrf_k_grid = [ai_config.RRF_K]
 
@@ -513,13 +565,17 @@ def sweep(
 
         for top_k in k_grid:
             for min_score in score_grid:
-                results = [
-                    run_retrieval(
-                        corpus, case, top_k=top_k, min_score=min_score,
-                        vector_mode=vector_mode, rrf_k=rrf_k,
+                results = []
+                for case in cases:
+                    # 整个批次共用一个事件循环：Redis/HTTP 客户端在导入时创建并
+                    # 绑定首个事件循环，逐用例 asyncio.run() 会让后续循环拿到
+                    # 已关闭的连接，报 "Event loop is closed"。
+                    results.append(
+                        await run_retrieval(
+                            corpus, case, top_k=top_k, min_score=min_score,
+                            vector_mode=vector_mode, rrf_k=rrf_k,
+                        )
                     )
-                    for case in cases
-                ]
                 refused, misfire = refusal_accuracy(results)
                 print(
                     f"{min_score:<12.3f}{top_k:<8}"
@@ -541,7 +597,7 @@ def sweep(
 # ---------------------------------------------------------------- CLI
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(description="RAG 检索质量评估")
     parser.add_argument("--baseline", action="store_true", help="打印当前配置的基线指标")
     parser.add_argument("--sweep", action="store_true", help="参数网格扫描")
@@ -590,7 +646,7 @@ def main() -> None:
     }
 
     if args.sweep:
-        sweep(corpus, cases, k=top_k, vector_mode=vector_mode)
+        await sweep(corpus, cases, k=top_k, vector_mode=vector_mode)
         return
 
     if not args.baseline:
@@ -598,12 +654,14 @@ def main() -> None:
         return
 
     started = time.perf_counter()
-    results = [
-        run_retrieval(
-            corpus, case, top_k=top_k, min_score=min_score, vector_mode=vector_mode
+    results = []
+    for case in cases:
+        results.append(
+            await run_retrieval(
+                corpus, case, top_k=top_k, min_score=min_score,
+                vector_mode=vector_mode,
+            )
         )
-        for case in cases
-    ]
     elapsed = time.perf_counter() - started
 
     meta["总耗时"] = f"{elapsed:.2f} s"
@@ -624,4 +682,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # 全流程共用一个事件循环（见 run_retrieval 处注释）
+    asyncio.run(main())

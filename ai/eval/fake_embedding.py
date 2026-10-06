@@ -1,52 +1,77 @@
 """
-评估用的确定性假 embedding 服务。
+确定性假 embedding —— 只用于 CI 和离线自测。
 
-用途
-----
-线上向量检索依赖 DashScope（要API Key、要联网、有计费），
-这让「向量路对召回到底有多大帮助」无法在本地和 CI 里量化。
-本模块用确定性哈希向量替代，把向量路的真实行为接进评估闭环：
+为什么需要它
+------------
+真实 embedding 需要 API Key、要花钱、有网络依赖。CI 上不能有这些。
+假向量让「双路融合的代码路径能否跑通、会不会抛异常」这件事在 CI 里可验证。
 
-- 评估可离线跑（CI 无需 Secret）
-- 结果完全可复现（同样输入必然同样向量）
-- 但它**不模拟语义相似性** —— 哈希向量之间没有语义关系，
-  只能验证「双路融合机制是否正常工作、分数量级是否符合预期」，
-  不能用来论证「向量检索提升了召回率」。后者必须用真实 embedding 测。
+它现在能做什么（重要）
+--------------------
+旧版实现是「对文本做 SHA-512 摘要再摊成向量」—— 纯哈希，**词面毫无关联**：
+两段完全相同的文字算出的相似度接近 0，两段毫不相干的文字相似度也一样。
+那样的向量对 MRR、置信门控这类指标完全没有代表性，CI 门禁就是个摆设。
 
-局限在 README 里明确标注，不拿它冒充真实结论。
+现在改成 **字符 n-gram 哈希（hashing trick）**：
+把文本拆成单字与相邻二元组，各自哈希到固定维度的桶里累加，最后 L2 归一化。
+于是「字面重合度高」的两段文本会得到更高的余弦相似度。
+
+这样做的边界，必须说清楚：
+- 它捕捉的是**词面重合**，不是语义相似。「股市下跌」和「A股走低」在这里是相近的，
+  真实 embedding 认为它们高度相似，而假向量只能看到「股市/下跌」这些字的共现。
+- 所以 CI 里的 MRR、拒答阈值**不能当成线上指标**，只能作为回归哨兵：
+  用来发现「改了排序逻辑导致结果大幅劣化」这类回归，
+  不能用来验证「检索质量达标」。
+
+线上真实数字请用 `python -m ai.eval.runner --baseline --vector-real` 单独测，
+结果记录在 ai/eval/README.md。
 """
 import hashlib
+import math
 from typing import Iterable
 
+DIM = 1024
 
-DIM = 1024  # 与 text-embedding-v4 维度一致，避免因维度不同影响相似度量级
+
+def _ngrams(text: str) -> Iterable[str]:
+    """
+    产出单字与相邻二元组。
+
+    中文没有空格分词，字符级的 n-gram 是不依赖词典的最省事做法。
+    单字保证「部分重合」也有信号，二元组提供一点词序信息。
+    """
+    compact = "".join(text.split())
+    for i, ch in enumerate(compact):
+        yield ch
+        if i + 1 < len(compact):
+            yield compact[i : i + 2]
 
 
 def fake_vector(text: str, dim: int = DIM) -> list[float]:
     """
-    由文本内容派生的确定性单位向量。
+    把文本映射成固定维度的确定性向量。
 
-    用 SHA-512 反复摘要填满 dim 维，比单次摘要拼接更均匀。
-    归一化到单位长度，这样余弦相似度直接等于点积。
+    用 sublinear TF（1+log tf）抑制长文档里高频字的权重 —— 不然一篇长新闻
+    会被重复出现的常用字撑出一个大向量，跟什么都「有点像」。
     """
-    if not text:
-        return [0.0] * dim
+    counts: dict[int, float] = {}
+    for gram in _ngrams(text):
+        h = int.from_bytes(
+            hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest(), "big"
+        )
+        idx = h % dim
+        counts[idx] = counts.get(idx, 0.0) + 1.0
 
-    needed = dim
-    chunks: list[float] = []
-    counter = 0
-    while len(chunks) < needed:
-        digest = hashlib.sha512(f"{counter}::{text}".encode("utf-8")).digest()
-        # 每个字节映射到 [-0.5, 0.5]
-        chunks.extend((b - 127.5) / 255.0 for b in digest)
-        counter += 1
+    vector = [0.0] * dim
+    for idx, tf in counts.items():
+        vector[idx] = 1.0 + math.log(tf)
 
-    vector = chunks[:dim]
-    norm = sum(x * x for x in vector) ** 0.5
-    if norm == 0:
-        return [0.0] * dim
-    return [x / norm for x in vector]
+    norm = math.sqrt(sum(v * v for v in vector))
+    if norm == 0.0:
+        return vector
+    return [v / norm for v in vector]
 
 
-def fake_vectors(texts: Iterable[str], dim: int = DIM) -> list[list[float]]:
+def fake_vectors(texts: list[str], dim: int = DIM) -> list[list[float]]:
+    """批量版本"""
     return [fake_vector(t, dim) for t in texts]

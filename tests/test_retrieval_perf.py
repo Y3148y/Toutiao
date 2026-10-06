@@ -11,7 +11,7 @@ from datetime import datetime
 import pytest
 
 import ai.retriever as retriever_module
-from ai.config import INDEX_CACHE_TTL, MIN_FUSION_SCORE
+from ai.config import INDEX_CACHE_TTL, MIN_FUSION_SCORE, MIN_VECTOR_SIM
 from ai.embeddings import VectorMatrix, cosine_similarity
 from ai.retriever import (
     RetrievalTrace,
@@ -373,8 +373,16 @@ def test_trace_records_all_stages(corpus):
     assert trace.bm25_hits > 0
     assert trace.bm25_ms > 0
     assert trace.fuse_ms >= 0
-    assert trace.threshold == MIN_FUSION_SCORE
     assert trace.fingerprint
+
+    # 阈值跟着实际使用的判据走：有向量余弦就用 MIN_VECTOR_SIM，
+    # 向量路不可用才退回 MIN_FUSION_SCORE。gateMode 记录了用的是哪一种，
+    # 排查「为什么这次拒答了」时必须能看出判据本身有没有被降级。
+    assert trace.gate_mode in {"vector_cosine", "rrf"}
+    if trace.gate_mode == "vector_cosine":
+        assert trace.threshold == MIN_VECTOR_SIM
+    else:
+        assert trace.threshold == MIN_FUSION_SCORE
 
 
 def test_trace_is_json_serializable(corpus):

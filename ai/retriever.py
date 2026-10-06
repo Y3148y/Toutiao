@@ -51,7 +51,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ai.config import (
     INDEX_CACHE_TTL,
     MAX_DOC_CHARS,
+    MIN_BM25_SCORE,
     MIN_FUSION_SCORE,
+    MIN_VECTOR_SIM,
     RRF_K,
     SINGLE_PATH_WEIGHT,
     TOP_K_BM25,
@@ -525,6 +527,7 @@ class RetrievalTrace:
         "query", "corpus_size", "bm25_ms", "vector_ms", "fuse_ms",
         "bm25_hits", "vector_hits", "vector_available", "top_score",
         "threshold", "confident", "results", "fingerprint",
+    "gate_mode",
     )
 
     def __init__(self, query: str):
@@ -538,6 +541,9 @@ class RetrievalTrace:
         self.vector_available = False
         self.top_score = 0.0
         self.threshold = MIN_FUSION_SCORE
+        # 记录这次用的是哪种置信判据。降级到 RRF 时必须能看出来，
+        # 否则「向量服务故障导致判据变弱」会被误读成「检索质量下降」。
+        self.gate_mode = "rrf"
         self.confident = False
         self.fingerprint = ""
         self.results: list[dict] = []
@@ -564,6 +570,7 @@ class RetrievalTrace:
                 "threshold": self.threshold,
                 "confident": self.confident,
                 "willRefuse": not self.confident,
+        "gateMode": self.gate_mode,
             },
             "results": self.results,
         }
@@ -675,8 +682,35 @@ async def retrieve(
     trace.fuse_ms = (_time.perf_counter() - t0) * 1000
 
     best_score = results[0].fusion_score if results else 0.0
-    confident = best_score >= MIN_FUSION_SCORE
-    trace.top_score = best_score
+
+# 置信门控：优先向量余弦，向量路不可用时退回 BM25 分数，RRF 只作最后兜底。
+    #
+    # 三级判据的原因：
+    #  1. 向量余弦（主）：负例中位 0.48 / 正例中位 0.80，有区分度。
+    #     原来只看 RRF 分数，实测负例误召回率 100% —— 阈值形同虚设，
+    #     因为 RRF 只用排名、丢掉分数幅度，403篇小语料里所有查询都顶到上限 0.0328。
+    #  2. BM25 分数（降级）：向量服务不可用时 RRF 恒为 0.0082，会把全部用例拒答掉，
+    #     所以降级时改用有真实幅度的 BM25 分数判断。
+    #  3. RRF 分数（兜底）：两者都拿不到时才用，语义最弱。
+    best_vector_sim = results[0].vector_score if results else None
+    top_bm25 = max(bm25_meta.values())[0] if bm25_meta else None
+
+    if best_vector_sim is not None:
+        confident = best_vector_sim >= MIN_VECTOR_SIM
+        trace.gate_mode = "vector_cosine"
+        trace.top_score = best_vector_sim
+        trace.threshold = MIN_VECTOR_SIM
+    elif top_bm25 is not None:
+        confident = top_bm25 >= MIN_BM25_SCORE
+        trace.gate_mode = "bm25_score"
+        trace.top_score = top_bm25
+        trace.threshold = MIN_BM25_SCORE
+    else:
+        confident = False
+        trace.gate_mode = "none"
+        trace.top_score = 0.0
+        trace.threshold = 0.0
+
     trace.confident = confident
     trace.results = [
         {

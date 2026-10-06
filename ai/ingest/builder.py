@@ -140,6 +140,7 @@ async def build_index(
     embed_model: str = "",
     resume: bool = True,
     strict: bool = False,
+    embed_dim: int = 0,
 ) -> BuildResult:
     """
     构建（或增量更新）向量索引。
@@ -147,6 +148,10 @@ async def build_index(
     docs        待索引的新闻列表
     previous    上一次的 manifest；为 None 时做全量构建
     embed_model 当前使用的 embedding 模型名，写进 manifest 用于失效判定
+    embed_dim   当前向量维度。传入时（>0）会参与失效判定：同一个模型可以输出
+                多种维度（qwen3.7-text-embedding 支持 256~2560），只比模型名会拿
+                上一维度的向量和新维度的语料混用，检索结果是错的且不报错。
+                留空则只比对模型名 —— 假向量/测试场景不固定维度时用。
     resume      是否续跑（读取上次进度跳过已完成文档）
 
     返回 BuildResult，包含 manifest 与本次构建的统计信息。
@@ -161,11 +166,24 @@ async def build_index(
     # 那些文档就永远进不了索引且无任何提示。
     current_hashes = build_content_hash_index(accepted)
 
-    # 决定哪些文档需要重新向量化
-    if previous and previous.embed_model == embed_model:
+# 决定哪些文档需要重新向量化
+    # embed_dim 未传（<=0）时只比模型名；传了就同时比维度。
+    # 不从 config 取默认值：假向量和测试用的维度是固定的，取配置值会把它们
+    # 误判成维度变更，导致每次都全量重建。
+    same_model = bool(previous) and previous.embed_model == embed_model
+    dim_ok = not embed_dim or (previous is not None and previous.embed_dim == embed_dim)
+    if same_model and dim_ok:
         need_embed = previous.changed_docs(current_hashes)
     else:
-        # 无历史 manifest，或换了模型 -> 全量重建
+        # 无历史 manifest，或换了模型/维度 -> 全量重建
+        if previous:
+            logger.info(
+                "索引失效：模型 %s@%s -> %s@%s，全量重建",
+                previous.embed_model,
+                previous.embed_dim,
+                embed_model,
+                embed_dim,
+            )
         need_embed = {n.id for n in accepted}
 
     done_ids: set[int] = set()
