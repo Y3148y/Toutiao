@@ -1,4 +1,11 @@
 -- 新闻资讯应用数据库设计
+--
+-- 重要：SET NAMES 必须放在最前面。
+-- MySQL 客户端的默认字符集不一定是 utf8mb4（Docker 官方镜像初始化时就会出问题），
+-- 少了这一行，中文会被当成 latin1 读入再按 utf8mb4 存一次，变成双重编码的乱码，
+-- 且乱码会直接写进库里，事后很难排查。
+SET NAMES utf8mb4;
+
 -- 创建数据库
 CREATE DATABASE IF NOT EXISTS news_app DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 

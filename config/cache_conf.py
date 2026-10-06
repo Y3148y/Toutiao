@@ -1,11 +1,13 @@
 import json
+import os
 from typing import Any
 
 import redis.asyncio as redis
 
-REDIS_HOST = "192.168.119.128"
-REDIS_PORT = 6379
-REDIS_DB = 3
+# 缓存配置：从环境变量读取，未设置时使用本地默认值
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "3"))
 
 redis_client = redis.Redis(
     host=REDIS_HOST,

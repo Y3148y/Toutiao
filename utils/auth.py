@@ -1,7 +1,5 @@
 # 整合工具，根据token查用户
-from http.client import HTTPException
-
-from fastapi import Header, Depends, status
+from fastapi import Header, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud import users
 

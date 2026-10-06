@@ -80,18 +80,15 @@ async def get_news_detail(db: AsyncSession, news_id: int):
     stmt = select(News).where(News.id == news_id)
     result = await db.execute(stmt)
     cache_news_detail = result.scalar_one_or_none()
-    # NewsItemBase.model_validate(cache_news_detail).model_dump(mode="json", by_alias=False)
-    # await set_cache_news_detail(news_id, NewsItemBase.model_validate(cache_news_detail).model_dump(mode="json", by_alias=False)) # false NewsItemBase 缺少 content 字段
-    # await set_cache_news_detail(news_id, cache_news_detail.__dict__) # ORM转dict
+    # 新闻不存在：交回路由层抛 404，不要往下走 model_validate
+    if cache_news_detail is None:
+        return None
 
+    # ORM -> Pydantic -> dict (-> json.dumps -> Redis)
+    # by_alias=False：缓存里存snake_case，回读时可直接 News(**dict)
     await set_cache_news_detail(news_id, NewsItemFull.model_validate(cache_news_detail).model_dump(mode="json", by_alias=False))
+    # 初始化浏览量到 Redis
     await init_news_views(news_id, cache_news_detail.views)
-    # 5. 初始化浏览量到 Redis（如果不存在）
-    views = await get_news_views(news_id)
-    if views is None:
-        await init_news_views(news_id, cache_news_detail.views)
-    else:
-        cache_news_detail.views = views  # 使用 Redis 中的值（可能更新）
     return cache_news_detail
 
 async def increase_news_news(db: AsyncSession, news_id: int):

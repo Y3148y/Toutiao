@@ -1,0 +1,19 @@
+# 运行时依赖
+# 版本为当前 .venv 实测可用版本，下限按主版本约束
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+SQLAlchemy>=2.0,<3.0
+greenlet>=3.0
+aiomysql>=0.2
+PyMySQL>=1.1
+# MySQL 8 默认用 caching_sha2_password 认证，aiomysql 依赖它做 RSA 握手，
+# 缺失会在连接阶段直接抛 RuntimeError
+cryptography>=42.0
+redis>=5.0
+pydantic>=2.7,<3.0
+# BM25 词面检索，用于和向量检索做混合召回
+rank-bm25>=0.2.2
+# 直接用原生 bcrypt，不用 passlib：passlib 1.7.4 已停止维护，
+# 与 bcrypt 4.1+ 不兼容（探针密码超 72 字节会抛 ValueError）
+bcrypt>=4.1
+httpx>=0.27

@@ -1,16 +1,27 @@
-from click import echo
-from pydantic.v1.validators import max_str_int
+import os
+
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession, create_async_engine
 
+# 数据库配置：从环境变量读取，未设置时使用本地默认值
+# 真实凭据请通过环境变量注入，切勿硬编码进代码
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "3306")
+DB_NAME = os.getenv("DB_NAME", "news_app")
+DB_CHARSET = os.getenv("DB_CHARSET", "utf8mb4")
+
 # 数据库URL
-ASYNC_DATABASE_URL = "mysql+aiomysql://root:MySQL901@localhost:3306/news_app?charset=utf8mb4"
+ASYNC_DATABASE_URL = (
+    f"mysql+aiomysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset={DB_CHARSET}"
+)
 
 # 创建异步引擎
 async_engine = create_async_engine(
     ASYNC_DATABASE_URL,
-    echo=True, # 可选：输出SQL日志
-    pool_size=20, # 设置连接池中保持的持久连接数
-    max_overflow=10 # 连接池溢出连接数
+    echo=os.getenv("DB_ECHO", "false").lower() == "true",  # 输出SQL日志
+    pool_size=int(os.getenv("DB_POOL_SIZE", "20")),  # 设置连接池中保持的持久连接数
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10"))  # 连接池溢出连接数
 )
 
 # 创建异步会话工厂
@@ -19,7 +30,6 @@ AsyncSessionLocal = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False
 )
-
 
 
 async def get_db():
@@ -36,15 +46,3 @@ async def get_db():
             raise e
         finally:
             await session.close()
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,7 +1,7 @@
 import uuid
 from datetime import timedelta, datetime
-from http.client import HTTPException
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from models.users import User, UserToken
@@ -38,8 +38,11 @@ async def create_token(db: AsyncSession, user_id: int):
     else:
         user_token = UserToken(user_id=user_id, token=token, expires_at=expires_at)
         db.add(user_token)
-        await db.commit()
 
+    # 必须在这里显式提交，不能依赖 get_db 的收尾 commit。
+    # 否则登录接口已经把新 token 返回给客户端了，而数据库里的值还没落盘，
+    # 客户端拿着 token 立刻发下一个请求会查不到，偶发 401（竞态）。
+    await db.commit()
     return token
 
 # 验证用户

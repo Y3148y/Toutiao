@@ -31,7 +31,6 @@ async def get_cache_news_lists(category_id: Optional[int], page: int, size: int)
 # detail:（同分类id的新闻）
 async def set_cache_news_detail(news_id: Optional[int], news_detail: dict, expire: int = 600):
     key = f"{NEWS_DETAIL_PREFIX}{news_id}"
-    print("执行detail缓存")
     return await set_cache(key, news_detail, expire)
 
 async def get_cache_news_detail(news_id: Optional[int]):

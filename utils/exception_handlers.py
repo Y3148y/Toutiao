@@ -1,7 +1,5 @@
-from http.client import HTTPException
-
-from pymysql import IntegrityError
-from sqlalchemy.exc import SQLAlchemyError
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from utils.exception import http_exception_handler, general_error_handler, sqlalchemy_error_handler, integrity_error_handler
 

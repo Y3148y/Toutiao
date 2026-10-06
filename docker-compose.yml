@@ -1,0 +1,98 @@
+# 一键起完整环境：MySQL + Redis + 应用
+#   docker compose up -d --build
+#   首次启动会自动执行 resourse/database.sql 建库并导入种子数据
+#   验证：curl http://localhost:3001/api/news/categories
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: toutiao-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${COMPOSE_MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: ${DB_NAME:-news_app}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 忽略客户端声明的字符集，统一按服务端 utf8mb4 处理，
+      # 与 database.sql 里的 SET NAMES utf8mb4 一起防止中文双重编码
+      - --character-set-client-handshake=FALSE
+    ports:
+      # 宿主机端口可配，避免和本机已装的MySQL 冲突
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 容器首次初始化时自动执行该目录下的 .sql 文件。
+      # 只在数据卷为空时执行；改了 database.sql 需要 docker compose down -v 才会重跑
+      - ./resourse/database.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # 用 mysqladmin 探活，且必须带密码，否则连的是匿名用户
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${COMPOSE_MYSQL_ROOT_PASSWORD:-root123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: toutiao-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: toutiao-app
+    restart: unless-stopped
+    # 等 MySQL/Redis 真正 healthy 再启动，
+    # 只用 depends_on 的 condition 是服务_state，不等于数据已就绪
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_USER: root
+      DB_PASSWORD: ${COMPOSE_MYSQL_ROOT_PASSWORD:-root123456}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-news_app}
+      DB_CHARSET: utf8mb4
+      DB_ECHO: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "3"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # 令牌桶限流：capacity 是突发上限，rate 是每秒补充令牌数（capacity<=0 关闭）
+      RATE_LIMIT_CAPACITY: ${RATE_LIMIT_CAPACITY:-100}
+      RATE_LIMIT_RATE: ${RATE_LIMIT_RATE:-100}
+      # 容器里关掉 reload，否则会挂载/监听代码变化
+      RELOAD: "false"
+      DEBUG_MODE: ${DEBUG_MODE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # AI（不配置也能起，只是 /api/ai/* 会返回 500）
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
+      DASHSCOPE_EMBED_MODEL: ${DASHSCOPE_EMBED_MODEL:-text-embedding-v4}
+      TZ: Asia/Shanghai
+    ports:
+      - "${APP_PORT:-3001}:3001"
+    volumes:
+      # 只挂日志目录，方便宿主机查看；代码不挂载，保证与镜像一致
+      - app-logs:/app/logs
+
+volumes:
+  mysql-data:
+  redis-data:
+  app-logs:

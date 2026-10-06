@@ -1,0 +1,31 @@
+# 依赖装在系统 Python 里，无需参与拷贝
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 敏感文件绝不能进镜像层
+.env
+
+# 本地日志与缓存
+*.log
+logs/
+
+# 开发工具配置
+.idea/
+.vscode/
+.git/
+
+# 文档与测试在运行镜像里不需要
+README.md
+ARCHITECTURE.md
+tests/
+pytest.ini
+test_main.http
+
+# Docker 自身文件
+Dockerfile
+.dockerignore
+docker-compose.yml

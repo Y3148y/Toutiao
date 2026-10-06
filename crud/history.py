@@ -1,5 +1,4 @@
 from datetime import datetime
-from idlelib.history import History
 
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,14 +42,14 @@ async def get_history_list(db: AsyncSession, user_id: int, page: int = 1, page_s
     rows = result.all()
     return rows, total
 
-async def remove_news_history(db: AsyncSession, user_id: int, news_id: int):
-    stmt = delete(History).where(History.user_id==user_id, History.news_id==news_id)
+async def remove_news_history(db: AsyncSession, user_id: int, history_id: int):
+    stmt = delete(History).where(History.user_id==user_id, History.id==history_id)
     res = await db.execute(stmt)
     await db.commit()
     return res.rowcount > 0
 
 
-async def remove_favorite_list(db: AsyncSession, user_id: int):
+async def remove_history_list(db: AsyncSession, user_id: int):
     stmt = delete(History).where(History.user_id==user_id)
     result = await db.execute(stmt)
     return result.rowcount

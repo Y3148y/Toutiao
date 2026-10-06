@@ -1,8 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Integer, DateTime, Index, ForeignKey, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped
-from sqlalchemy.testing.schema import mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from models.news import News
 from models.users import User

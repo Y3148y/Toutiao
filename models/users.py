@@ -1,8 +1,7 @@
 from typing import Optional
 
-from sqlalchemy.orm import DeclarativeBase, Mapped
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import Index, Integer, String, Enum, DateTime, ForeignKey
-from sqlalchemy.testing.schema import mapped_column
 from datetime import datetime
 
 
