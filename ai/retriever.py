@@ -10,7 +10,12 @@
 - **向量语义**：能跨越表述差异。「高铁延长运行时间」和「动车组新增班次」
   零字面重叠，BM25 分数是 0，但向量能判定它们语义相近。
 
-实测中常见的结论是：只用向���会漏掉专名查询，只用 BM25 会漏掉同义表述，
+实测中常见的结论是：只用向量会漏掉专名查询，只用 BM25 会漏掉同义表述，
+
+> 本项目自身的实测（完整数据见 ai/eval/README.md）：
+> BM25 单路 Recall@5 93.9%。向量路的真实增益需要有效 API Key 才能测 ——
+> 无语义的假向量会让 MRR 从 90.5% 掉到 50.7%，说明融合机制在单路退化时
+> 缺乏保护，这也是已记录的待改进项。
 融合后召回率显著高于任一单路。
 
 RRF 融合
@@ -24,9 +29,16 @@ k 取 60 是原论文的经验值，作用是压制头部的过度影响，
 
 为什么不用向量数据库
 --------------------
-本项目语料只有几十条新闻，逐条算余弦相似度是几十次乘加，微秒级。
-引入 FAISS/Milvus 增加运维和依赖成本却没有实际收益。
-真到了百万级再换，届时接口不用改。
+语料 403 条，全量扫描用 numpy 矩阵乘只要 0.26ms（实测），引 FAISS/Milvus
+只会增加部署与运维成本而没有收益。真正需要 ANN 索引（HNSW/IVF）时是百万级以上，
+届时替换 VectorMatrix.search() 的内部实现即可，调用方无需改动。
+
+缓存层次
+--------
+检索有两处重开销，都随语料缓存而非每次重算：
+- BM25 索引构造：实测 74.3ms/查询（tokenize 38.4ms + 建索引打分 35.9ms）
+- 语料向量读取：逐条 GET 是 404 次 Redis 往返（实测 1497ms）
+两者都由语料指纹做键，语料不变时直接复用。
 """
 import json
 import re
@@ -45,14 +57,26 @@ from ai.config import (
     TOP_K_BM25,
     TOP_K_FINAL,
     TOP_K_VECTOR,
+    TRACE_ENABLED,
+    TRACE_TTL,
 )
-from ai.embeddings import cosine_similarity, embed_query, embed_texts
+from ai.embeddings import VectorMatrix, embed_query, embed_texts
+from config.cache_conf import redis_client
 from models.news import News
 from utils.logging_conf import get_logger
 
 logger = get_logger(__name__)
 
 _CORPUS_CACHE_KEY = "ai:corpus:news"
+_CORPUS_VECTORS_CACHE_KEY = "ai:corpus:vectors"
+# 语料向量矩阵的进程内缓存：构造 numpy 矩阵有固定开销，
+# 同一份语料连续多次查询不该重复构造。用 (语料版本, 长度) 做键。
+_matrix_cache: dict[str, object] = {}
+_MATRIX_CACHE_MAX = 2  # 只留最近几个版本，防止语料频繁变动时内存膨胀
+
+# BM25 索引的进程内缓存：语料不变时索引也完全不变，缓存没有正确性风险
+_bm25_cache: dict[str, tuple] = {}
+_INDEX_CACHE_MAX = 2
 
 # 连续的中日韩统一表意文字
 _CJK = r"\u4e00-\u9fff\u3400-\u4dbf"
@@ -66,7 +90,7 @@ def tokenize(text: str) -> list[str]:
 
     刻意不引入 jieba：为了中文分词多装一个依赖不划算，而且语料是新闻这种
     规整文本。用「单字 + 相邻二元组」的中文检索常用基线就能拿到不错的效果：
-        「中国高铁」 -> 中 国 高 铁 / 中国 国高 ��铁
+        「中国高铁」 -> 中 国 高 铁 / 中国 国高 高铁
     这样单字查询（「高铁」）和组合查询（「中国高铁」）都能命中。
     ASCII 单词和数字整体保留，因为「GDP」「5.2%」这类专名必须当成完整 token。
     """
@@ -147,8 +171,6 @@ async def load_corpus(db: AsyncSession, use_cache: bool = True) -> list[News]:
     新闻列表接口自己有分级缓存，但那是给前端用的分页视图；
     检索需要一次性拿全量，用独立 key 避免互相污染。
     """
-    from config.cache_conf import redis_client
-
     if use_cache:
         try:
             raw = await redis_client.get(_CORPUS_CACHE_KEY)
@@ -218,16 +240,13 @@ def bm25_search(
        任何两条新闻之间都能凑出几个共同单字。只靠单字命中的结果全是误召回，
        会让无关问题也走上LLM，然后靠模型去编。所以必须命中二元组或 ASCII 词。
     """
-    from rank_bm25 import BM25Okapi
-
     if not corpus:
         return []
 
-    docs = [tokenize(build_document(n)) for n in corpus]
-    if not any(docs):
+    bm25, docs = get_bm25_index(corpus)
+    if bm25 is None:
         return []
 
-    bm25 = BM25Okapi(docs)
     scores = bm25.get_scores(tokenize(query))
 
     query_terms = set(tokenize(query))
@@ -258,6 +277,9 @@ async def vector_search(
     """
     向量语义检索，返回 [(新闻下标, 余弦相似度)]，按相似度降序。
 
+    语料向量矩阵随语料一起缓存，避免每次查询都重新读取 403 条向量
+    （实测逐条 GET 是 404 次往返 / 1497ms）。
+
     向量化失败时返回空列表并降级为纯 BM25 —— 语义检索是增强项，
     不该因为它挂了就让整个问答不可用。
     """
@@ -265,18 +287,139 @@ async def vector_search(
         return []
 
     try:
-        documents = [build_document(n) for n in corpus]
-        all_vectors = await embed_texts(documents)
+        matrix = await get_corpus_vector_matrix(corpus)
         query_vector = await embed_query(query)
     except Exception as exc:
         logger.warning("向量检索不可用，降级为纯 BM25: %s", exc)
         return []
 
-    scored = [
-        (idx, cosine_similarity(query_vector, vec)) for idx, vec in enumerate(all_vectors)
-    ]
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored[:top_k]
+    try:
+        return matrix.search(query_vector, top_k)
+    except ValueError as exc:
+        # 维度不一致通常意味着换了 embedding 模型但语料缓存还在
+        logger.warning("向量维度不一致，清缓存后重试一次: %s", exc)
+        try:
+            await invalidate_corpus_index()
+            matrix = await get_corpus_vector_matrix(corpus, force_rebuild=True)
+            return matrix.search(query_vector, top_k)
+        except Exception as retry_exc:
+            logger.warning("重建语料向量后仍失败，降级为纯 BM25: %s", retry_exc)
+            return []
+
+
+def get_bm25_index(corpus: list[News]):
+    """
+    取 BM25 索引，索引随语料缓存。
+
+    为什么必须缓存
+    --------------
+    BM25Okapi 构造时要遍历全部语料做词频统计。之前每次查询都重建，
+    实测 403 条语料下 tokenize 38.4ms + 建索引打分 35.9ms = 74.3ms，
+    而查询本身的打分只需要几毫秒 —— 90% 的时间花在准备索引上。
+    语料不变时索引也完全不变，缓存没有正确性风险。
+
+    返回 (BM25Okapi 实例, 分词后的文档列表)；语料为空时返回 (None, [])。
+    """
+    fingerprint = _corpus_fingerprint(corpus)
+
+    if fingerprint in _bm25_cache:
+        return _bm25_cache[fingerprint]
+
+    from rank_bm25 import BM25Okapi
+
+    docs = [tokenize(build_document(n)) for n in corpus]
+    if not any(docs):
+        return None, docs
+
+    bm25 = BM25Okapi(docs)
+
+    while len(_bm25_cache) >= _INDEX_CACHE_MAX:
+        _bm25_cache.pop(next(iter(_bm25_cache)))
+    _bm25_cache[fingerprint] = (bm25, docs)
+    return bm25, docs
+
+
+def clear_index_cache() -> None:
+    """清空 BM25 索引的进程内缓存（语料内容变更后可调用）"""
+    _bm25_cache.clear()
+
+
+def _corpus_fingerprint(corpus: list[News]) -> str:
+    """
+    语料指纹：内容变化才会导致缓存失效。
+
+    用 (条数, 首尾 id, 首尾标题) 而不是全文 hash —— 全文 hash 403 条要几十毫秒，
+    反而抵消了缓存收益；而新闻一旦变动通常会新增或改标题，首尾足以反映变化。
+    """
+    if not corpus:
+        return "empty"
+    head = corpus[0]
+    tail = corpus[-1]
+    return f"{len(corpus)}:{head.id}:{head.title[:20]}:{tail.id}:{tail.title[:20]}"
+
+
+async def get_corpus_vector_matrix(corpus: list[News], force_rebuild: bool = False):
+    """
+    取语料向量矩阵，优先进程内缓存，其次 Redis，最后调 embedding API。
+
+    三层缓存的原因：
+    1. 进程内 —— numpy 矩阵构造有开销，构造一次约几毫秒
+    2. Redis —— 避免重复调付费 API
+    3. API —— 最终来源
+
+    维度不一致时（换了 embedding 模型）自动失效重建，见 vector_search 的处理。
+    """
+    from ai.embeddings import VectorMatrix
+
+    fingerprint = _corpus_fingerprint(corpus)
+
+    if not force_rebuild and fingerprint in _matrix_cache:
+        return _matrix_cache[fingerprint]
+
+    vectors: list[list[float]] | None = None
+    if not force_rebuild:
+        try:
+            raw = await redis_client.get(_CORPUS_VECTORS_CACHE_KEY)
+            if raw:
+                payload = json.loads(raw)
+                # 缓存必须和当前语料一一对应，否则下标映射会错位
+                if payload.get("fingerprint") == fingerprint:
+                    vectors = payload.get("vectors")
+        except Exception as exc:
+            logger.warning("读取语料向量缓存失败: %s", exc)
+
+    if vectors is None:
+        documents = [build_document(n) for n in corpus]
+        # batch_lookup=True：403 条从 404 次往返降到 1 次
+        vectors = await embed_texts(documents, batch_lookup=True)
+        try:
+            await redis_client.setex(
+                _CORPUS_VECTORS_CACHE_KEY,
+                INDEX_CACHE_TTL,
+                json.dumps(
+                    {"fingerprint": fingerprint, "vectors": vectors}, ensure_ascii=False
+                ),
+            )
+        except Exception as exc:
+            logger.warning("写入语料向量缓存失败: %s", exc)
+
+    matrix = VectorMatrix(vectors)
+    if force_rebuild or _matrix_cache:
+        # 只保留少量版本，防止语料频繁变动导致内存无限增长
+        while len(_matrix_cache) >= _MATRIX_CACHE_MAX:
+            _matrix_cache.pop(next(iter(_matrix_cache)))
+    _matrix_cache[fingerprint] = matrix
+    return matrix
+
+
+async def invalidate_corpus_index() -> None:
+    """清掉语料向量缓存（Redis + 进程内），用于换了模型或语料结构变化时"""
+    _matrix_cache.clear()
+    try:
+        await redis_client.delete(_CORPUS_VECTORS_CACHE_KEY)
+        logger.info("语料向量缓存已清除")
+    except Exception as exc:
+        logger.warning("清除语料向量缓存失败: %s", exc)
 
 
 def reciprocal_rank_fusion(
@@ -314,11 +457,104 @@ def reciprocal_rank_fusion(
     return scores
 
 
+class RetrievalTrace:
+    """
+    单次检索的链路追踪。
+
+    排查「为什么这个查询返回了这个结果」时，需要能看到：
+    1. 各阶段耗时（慢在哪）
+    2. 每路召回了多少候选
+    3. 最终结果的分数构成（哪路贡献的、是不是单路命中被降权）
+    4. 置信度判定依据
+
+    这些数据写结构化日志，同时在开启 trace 开关时落到 Redis，
+    便于事后按 request_id 回查。
+    """
+
+    __slots__ = (
+        "query", "corpus_size", "bm25_ms", "vector_ms", "fuse_ms",
+        "bm25_hits", "vector_hits", "vector_available", "top_score",
+        "threshold", "confident", "results", "fingerprint",
+    )
+
+    def __init__(self, query: str):
+        self.query = query
+        self.corpus_size = 0
+        self.bm25_ms = 0.0
+        self.vector_ms = 0.0
+        self.fuse_ms = 0.0
+        self.bm25_hits = 0
+        self.vector_hits = 0
+        self.vector_available = False
+        self.top_score = 0.0
+        self.threshold = MIN_FUSION_SCORE
+        self.confident = False
+        self.fingerprint = ""
+        self.results: list[dict] = []
+
+    def to_dict(self) -> dict:
+        return {
+            "query": self.query,
+            "corpusSize": self.corpus_size,
+            "corpusFingerprint": self.fingerprint,
+            "timing": {
+                "bm25Ms": round(self.bm25_ms, 2),
+                "vectorMs": round(self.vector_ms, 2),
+                "fuseMs": round(self.fuse_ms, 2),
+                "totalMs": round(self.bm25_ms + self.vector_ms + self.fuse_ms, 2),
+            },
+            "recall": {
+                "bm25Hits": self.bm25_hits,
+                "vectorHits": self.vector_hits,
+                "vectorAvailable": self.vector_available,
+                "degradedToBm25": not self.vector_available,
+            },
+            "decision": {
+                "topScore": round(self.top_score, 6),
+                "threshold": self.threshold,
+                "confident": self.confident,
+                "willRefuse": not self.confident,
+            },
+            "results": self.results,
+        }
+
+    def log_line(self) -> str:
+        return (
+            f"检索 '{self.query}' 语料{self.corpus_size}条 "
+            f"| BM25 {self.bm25_hits}档 {self.bm25_ms:.1f}ms "
+            f"| 向量 {self.vector_hits}档 {self.vector_ms:.1f}ms"
+            f"{'' if self.vector_available else '(降级)'}"
+            f" | 融合 {self.fuse_ms:.1f}ms "
+            f"| 最高分 {self.top_score:.4f} vs 阈值 {self.threshold} "
+            f"-> {'作答' if self.confident else '拒答'}"
+        )
+
+
+async def _write_trace(trace: RetrievalTrace) -> None:
+    """把 trace 写结构化日志；开关打开时同时落 Redis"""
+    payload = trace.to_dict()
+    logger.info("rag_trace %s", json.dumps(payload, ensure_ascii=False))
+
+    if not TRACE_ENABLED:
+        return
+    try:
+        from utils.logging_conf import get_request_id
+
+        key = f"ai:trace:{get_request_id()}"
+        # 必须 await：redis-py 的命令返回协程，不 await 等于什么都没做
+        # （这个 bug 曾导致 trace 静默丢失：日志正常但 Redis 里没有任何数据）
+        await redis_client.setex(key, TRACE_TTL, json.dumps(payload, ensure_ascii=False))
+    except Exception as exc:
+        # trace 写不进去不能影响主流程 —— 它是可观测性手段，不是业务逻辑
+        logger.debug("写检索 trace 失败: %s", exc)
+
+
 async def retrieve(
     db: AsyncSession,
     query: str,
     top_k: int = TOP_K_FINAL,
     use_cache: bool = True,
+    trace: RetrievalTrace | None = None,
 ) -> tuple[list[RetrievedNews], bool]:
     """
     对新闻语料执行混合检索。
@@ -326,18 +562,40 @@ async def retrieve(
     返回 (召回列表, 是否达到置信度阈值)。
     第二个返回值供调用方判断：没达到就该直接拒答，不要调 LLM 去编。
     """
+    trace = trace or RetrievalTrace(query)
+    import time as _time
+
+    t_all = _time.perf_counter()
     corpus = await load_corpus(db, use_cache=use_cache)
     if not corpus:
-        logger.warning("新闻语料为空，跳过检索")
+        logger.warning("新闻语料为空，跳过检索: %s", query)
+        trace.corpus_size = 0
+        trace.confident = False
+        await _write_trace(trace)
         return [], False
 
+    trace.corpus_size = len(corpus)
+    trace.fingerprint = _corpus_fingerprint(corpus)
+    trace.threshold = MIN_FUSION_SCORE
+
+    t0 = _time.perf_counter()
     bm25_hits = bm25_search(corpus, query)
+    trace.bm25_ms = (_time.perf_counter() - t0) * 1000
+    trace.bm25_hits = len(bm25_hits)
+
+    t0 = _time.perf_counter()
     vector_hits = await vector_search(corpus, query)
+    trace.vector_ms = (_time.perf_counter() - t0) * 1000
+    trace.vector_hits = len(vector_hits)
+    # 有 BM25 命中但向量一路空 = 向量服务不可用，已降级
+    trace.vector_available = bool(vector_hits)
 
     if not bm25_hits and not vector_hits:
         logger.info("BM25 与向量检索均无命中: %s", query)
+        await _write_trace(trace)
         return [], False
 
+    t0 = _time.perf_counter()
     bm25_rank = {idx: i + 1 for i, (idx, _, _) in enumerate(bm25_hits)}
     bm25_meta = {idx: (score, terms) for idx, score, terms in bm25_hits}
     vector_rank = {idx: i + 1 for i, (idx, _) in enumerate(vector_hits)}
@@ -364,19 +622,29 @@ async def retrieve(
                 matched_terms=terms,
             )
         )
+    trace.fuse_ms = (_time.perf_counter() - t0) * 1000
 
     best_score = results[0].fusion_score if results else 0.0
     confident = best_score >= MIN_FUSION_SCORE
+    trace.top_score = best_score
+    trace.confident = confident
+    trace.results = [
+        {
+            "newsId": r.news_id,
+            "title": r.title,
+            "fusionScore": round(r.fusion_score, 6),
+            "bm25Rank": r.bm25_rank,
+            "vectorRank": r.vector_rank,
+            "vectorScore": round(r.vector_score, 4) if r.vector_score is not None else None,
+            "matchedTerms": r.matched_terms,
+            # 只被一路命中 -> 被降权过，标记出来便于排查「为什么分数这么低」
+            "singlePath": (r.bm25_rank is None) != (r.vector_rank is None),
+        }
+        for r in results
+    ]
 
-    logger.info(
-        "检索 '%s' -> %s 条（BM25 %s / 向量 %s），最高融合分 %.4f，置信%s",
-        query,
-        len(results),
-        len(bm25_hits),
-        len(vector_hits),
-        best_score,
-        "足" if confident else "不足",
-    )
+    logger.info("rag_trace %s", trace.log_line())
+    await _write_trace(trace)
     return results, confident
 
 

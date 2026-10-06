@@ -85,6 +85,12 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen-plus}
       DASHSCOPE_EMBED_MODEL: ${DASHSCOPE_EMBED_MODEL:-text-embedding-v4}
+      # 检索参数
+      AI_TOP_K_FINAL: ${AI_TOP_K_FINAL:-5}
+      AI_MIN_FUSION_SCORE: ${AI_MIN_FUSION_SCORE:-0.02}
+      AI_SINGLE_PATH_WEIGHT: ${AI_SINGLE_PATH_WEIGHT:-0.5}
+      # 检索链路追踪：开启后按 request_id 把 trace 落到 Redis
+      AI_TRACE_ENABLED: ${AI_TRACE_ENABLED:-false}
       TZ: Asia/Shanghai
     ports:
       - "${APP_PORT:-3001}:3001"

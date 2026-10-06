@@ -63,10 +63,16 @@ toutiao_backend/
 ├── ai/                         # AI 能力
 │   ├── ai_chat.py             # 通用大模型 SSE 代理
 │   ├── config.py              # AI 配置与阈值（集中管理，全部走环境变量）
-│   ├── embeddings.py          # 文本向量化 + Redis 缓存 + 余弦相似度
-│   ├── retriever.py           # BM25 + 向量混合检索 + RRF 融合
+│   ├── embeddings.py          # 向量化 + numpy 向量矩阵 + Redis 批量缓存
+│   ├── retriever.py           # 混合检索 + RRF 融合 + 索引缓存 + 链路追踪
 │   ├── prompts.py             # 带约束的 prompt 与拒答文案
-│   └── news_qa.py             # 新闻问答接口（SSE 流式 + 溯源）
+│   ├── news_qa.py             # 新闻问答接口（SSE 流式 + 溯源）
+│   └── eval/                  # 检索质量评估
+│       ├── dataset.jsonl      # 55 条评估集（含难例与负例）
+│       ├── runner.py          # 6 个指标 + 参数网格扫描
+│       ├── fake_embedding.py  # 确定性假向量（离线验证融合机制）
+│       ├── export_corpus.py   # 语料导出（供评估离线运行）
+│       └── README.md          # 基线数据与已知局限
 ├── tests/                      # 单元测试 (pytest, 纯 mock)
 │   ├── conftest.py            # 公共 fixture：假 Session / Redis 打桩 / 依赖覆盖
 │   ├── fakes.py               # FakeResult、FakeSession
@@ -76,7 +82,10 @@ toutiao_backend/
 │   ├── test_response.py       # 统一响应体与接口契约
 │   ├── test_logging.py        # 请求 ID、日志初始化
 │   ├── test_rate_limit.py     # 令牌桶突发/补充/并发原子性
-│   └── test_retrieval.py      # 分词、BM25、RRF 融合、prompt、防幻觉约束
+│   ├── test_retrieval.py      # 分词、BM25、RRF 融合、prompt、防幻觉约束
+│   ├── test_retrieval_perf.py # 检索性能回归哨兵 + 缓存行为
+│   ├── test_retrieval_trace.py# 链路追踪写入（含 await 缺失的回归测试）
+│   └── test_rag_quality.py    # 召回率与误召回率 CI 门禁
 ├── resourse/                   # 资源文件
 │   └── database.sql           # 数据库初始化脚本（含 50+ 条种子数据）
 └── utils/                      # 工具类
@@ -223,13 +232,50 @@ toutiao_backend/
 
 拒答时仍会把检索到的报道标题列给用户 —— 完全不给信息体验太差，而模型此时并没有编造的机会。
 
-### 语料规模与取舍
+### 性能与缓存
 
-当前语料约 **400 条**新闻。逐条算余弦相似度是几十次乘加，微秒级，**不需要引入向量数据库**（FAISS/Milvus/pgvector 增加运维和依赖却没有实际收益）。到百万级再换，届时检索接口不用改。
+检索有两处重开销，都随语料缓存而非每次重算：
 
-中文分词刻意不引入 jieba：新闻文本规整，「单字 + 相邻二元组」的中文检索常用基线效果已足够，少一个依赖。
+| 环节 | 优化前 | 优化后 | 手段 |
+|---|---|---|---|
+| BM25 检索 | 74.3ms | **2.1ms** | 索引随语料缓存 |
+| 向量检索 | 72.7ms | **0.26ms** | numpy 矩阵乘替代纯 Python 循环 |
+| 语料向量读取 | 404 次 Redis 往返 | **1 次 MGET** | 批量读取 + 语料级向量缓存 |
+| 完整检索（缓存命中） | ~1.6s | **0.1ms** | 上述叠加 |
 
-embedding 按内容 hash 缓存到 Redis，语料不变时只算一次（403 条文档 × 1024 维，冷启动需分批调用，冷启动成本一次性）。
+语料指纹用 `(条数, 首尾 id, 首尾标题)` 计算，内容变化才失效。完整评估数据见 `ai/eval/README.md`。
+
+### 检索链路追踪
+
+每次检索记录完整链路，`AI_TRACE_ENABLED=true` 时按 `request_id` 落到 Redis：
+
+```
+timing  : {'bm25Ms': 2.07, 'vectorMs': 302.18, 'fuseMs': 0.09, 'totalMs': 304.35}
+recall  : {'bm25Hits': 20, 'vectorHits': 0, 'vectorAvailable': False, 'degradedToBm25': True}
+decision: {'topScore': 0.008197, 'threshold': 0.02, 'confident': False, 'willRefuse': True}
+top1    : id=44 score=0.008197 bm25=1 vec=None single=True terms=['高铁']
+```
+
+能回答四类问题：慢在哪、**是否已降级为纯 BM25**、为什么拒答、命中了哪些词。
+`degradedToBm25` 用来发现「以为在跑混合检索，实际向量路没生效」这种静默故障。
+
+排查时按用户报的 `X-Request-ID` 取：
+```bash
+redis-cli -n 3 GET "ai:trace:<request_id>"
+```
+
+### 检索质量评估
+
+已建成评估体系（55 条评估集 + 6 个指标 + 参数扫描 + CI 门禁），当前基线：
+
+| 指标 | @1 | @3 | @5 |
+|---|---|---|---|
+| Recall@K | 87.8% | 93.9% | 93.9% |
+| MRR@K | 87.8% | 90.5% | 90.5% |
+| nDCG@K | 87.8% | 91.4% | 91.4% |
+
+误召回率 0%。用法与已知局限见 `ai/eval/README.md` —— 那里记录了两个必须知道的限制：
+阈值尚未标定、评估集的 gold 是按标题反推而非人工标注。
 
 ### 已知限制
 
@@ -453,6 +499,16 @@ export AI_RRF_K=60                # RRF 平滑常数
 export AI_SINGLE_PATH_WEIGHT=0.5  # 单路命中惩罚系数
 export AI_MIN_FUSION_SCORE=0.02   # 低于此分判定为无相关报道，直接拒答
 export AI_MAX_DOC_CHARS=400       # 每条新闻最多取多少字进上下文
+export AI_TRACE_ENABLED=false     # 开启后按 request_id 把检索链路落到 Redis
+```
+
+### 6. 运行检索质量评估
+
+```bash
+python -m ai.eval.export_corpus                # 导出语料（改了 database.sql 需重跑）
+python -m ai.eval.runner --baseline --k 1,3,5,8
+python -m ai.eval.runner --sweep --top-k 5     # 参数网格扫描，输出权衡表
+python -m ai.eval.runner --baseline --vector-real   # 需有效 API Key
 ```
 
 所有变量都有默认值，未设置时回落到本地开发配置。
@@ -499,6 +555,8 @@ pytest -q
 - **日志追踪**：每个响应带 `X-Request-ID`、上游传入的 ID 会被复用、`contextvars` 请求结束后正确还原
 - **限流**：令牌桶突发容量与补充速率、50 并发不超发的原子性验证、按 IP+路径分桶、时钟回拨防护、Redis 故障 fail-open
 - **检索**：中文分词的单字/二元组、BM25 专名精确匹配、单字噪声过滤、RRF 融合数学、单路命中惩罚、余弦零向量保护
+- **性能回归哨兵**：BM25 < 25ms、向量 < 5ms、缓存必须命中且不得无界增长
+- **链路追踪**：trace 落 Redis、`request_id` 关联、TTL 正确、降级模式被标记、写失败不影响主流程
 - **防幻觉**：SSE 溯源事件可 JSON 序列化（datetime 边界处理）、拒答文案包含已检索到的报道、system prompt 约束存在性
 - **接口契约**：所有接口返回 `code`/`message`/`data`，响应体中不再出现 `msg`
 

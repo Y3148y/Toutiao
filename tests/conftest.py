@@ -59,6 +59,32 @@ def stub_redis(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def stub_retrieval_redis(monkeypatch):
+    """
+    打桩检索链路用到的 Redis。
+
+    不打桩的话会真去连 Redis，连不上要等 TCP 超时（实测每个用例约 2 秒），
+    而且语料向量缓存读不到会让向量路每次都降级。
+    """
+    import ai.retriever as retriever
+
+    class FakeRedis:
+        async def get(self, key):
+            return None
+
+        async def mget(self, keys):
+            return [None] * len(keys)
+
+        async def setex(self, key, ttl, value):
+            return True
+
+        async def delete(self, key):
+            return True
+
+    monkeypatch.setattr(retriever, "redis_client", FakeRedis(), raising=False)
+
+
+@pytest.fixture(autouse=True)
 def stub_embeddings(monkeypatch):
     """
     默认把向量化打桩成确定性的本地实现。

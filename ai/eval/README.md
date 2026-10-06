@@ -162,15 +162,55 @@ Recall 与误召回必须一起看：只优化 Recall 很容易靠放宽阈值�
 
 ---
 
-## 已知问题（本轮未修）
+## 性能优化实测（本轮已完成）
 
-| 问题 | 实测数据 | 影响 |
-|---|---|---|
-| **embedding 缓存 N+1** | 每查询 **404 次 Redis 往返 / 1497ms** | 逐条 GET 拼向量，403 条已不可接受 |
-| **向量检索纯 Python** | 403×1024 维遍历 **72.7ms/次** | 未用 numpy 矩阵乘 |
-| **BM25 索引每次重建** | tokenize 403篇 **38.4ms** + 重建打分 **35.9ms** | 每查询固定 56ms |
-| **无检索链路 trace** | 只有 request_id 级HTTP 日志 | 无法复盘「为什么排出这个结果」 |
-| **评估集未人工校验** | gold 按标题反推 | 衡量的是词面命中而非语义正确性 |
+| 环节 | 优化前 | 优化后 | 手段 |
+|---|---|---|---|
+| BM25 检索 | 74.3ms | **2.1ms**（36x） | 索引随语料缓存，不再每查询重建 |
+| 向量检索 | 72.7ms | **0.26ms**（280x） | numpy 矩阵乘替代纯 Python zip 循环 |
+| 语料向量读取 | 404 次往返 / 1497ms | **1 次 MGET** | `batch_lookup=True` 批量读取 + 语料级向量缓存 |
+| 完整 retrieve（缓存命中） | ~1.6s | **0.1ms** | 上述三项叠加 |
 
-性能三项合起来约 1.6 秒/查询（向量可用时）。这是下一轮的事，
-本轮刻意不做 —— 没有基线数字时优化等于盲改。
+首查（建索引 + 向量化）约 2.3s，之后稳定在毫秒级。语料指纹变化时自动失效重建。
+
+新增 `tests/test_retrieval_perf.py`（29 个用例）把这些数字钉死：
+BM25 < 25ms、向量 < 5ms、缓存必须生效、缓存不得无界增长。
+性能一旦回退 CI 会红。
+
+## 检索链路 trace
+
+每次检索记录完整链路，`AI_TRACE_ENABLED=true` 时按 `request_id` 落到 Redis：
+
+```
+trace keys: 1 ['ai:trace:edb1ad39']
+  query  : 高铁新增班次
+  timing : {'bm25Ms': 2.07, 'vectorMs': 302.18, 'fuseMs': 0.09, 'totalMs': 304.35}
+  recall : {'bm25Hits': 20, 'vectorHits': 0, 'vectorAvailable': False, 'degradedToBm25': True}
+  decision: {'topScore': 0.008197, 'threshold': 0.02, 'confident': False, 'willRefuse': True}
+  results: 5 singlePath: 5
+  top1   : id=44 score=0.008197 bm25=1 vec=None single=True terms=['高铁']
+```
+
+能回答的问题：
+
+- **慢在哪** —— 各阶段耗时独立统计
+- **是否降级** —— `degradedToBm25` 标记「以为在跑混合检索，实际向量路没生效」
+- **为什么拒答** —— `topScore` vs `threshold` 的实际数值
+- **单路命中被降权** —— 每条结果的 `singlePath` 标记，能定位「为什么分数这么低」
+- **命中了哪些词** —— `matchedTerms`，用于诊断分词质量
+
+排查时直接按用户报的 `X-Request-ID` 取：`redis-cli -n 3 GET "ai:trace:<request_id>"`。
+
+> 修复过一个隐蔽缺陷：`redis_client.setex()` 漏了 `await`，协程从未执行，
+> trace 静默丢失 —— 日志正常但 Redis 里什么都没有。`tests/test_retrieval_trace.py`
+> 有对应回归测试。
+
+## 剩余问题
+
+| 问题 | 状态 |
+|---|---|
+| `MIN_FUSION_SCORE` 阈值标定 | **仍未解决**。需真实 API Key 跑 `--vector-real`；单路模式下 0.008~0.012 是断崖，无可调空间 |
+| 评估集未人工校验 | gold 按标题反推，衡量的是词面命中而非语义正确性 |
+| 融合机制缺单路保护 | 假向量使 MRR 腰斩（90.5% → 50.7%），一路退化会拖垮另一路 |
+| CI 门禁较弱 | 实测两次注入缺陷均未拦住，只挡「检索彻底失效」 |
+| 离线管线缺失 | 无文档解析、无分块、无批量 embedding 作业、无索引版本管理 |

@@ -49,6 +49,11 @@ MAX_DOC_CHARS = int(os.getenv("AI_MAX_DOC_CHARS", "400"))
 INDEX_CACHE_TTL = int(os.getenv("AI_INDEX_CACHE_TTL", "3600"))
 EMBEDDING_CACHE_TTL = int(os.getenv("AI_EMBEDDING_CACHE_TTL", "86400"))
 
+# 检索链路 trace：默认写结构化日志；开启后额外按 request_id 落到 Redis，
+# 便于事后回查「为什么这次检索返回了这个结果」。默认关闭是因为它有额外写入开销。
+TRACE_ENABLED = os.getenv("AI_TRACE_ENABLED", "false").lower() == "true"
+TRACE_TTL = int(os.getenv("AI_TRACE_TTL", "3600"))
+
 
 def is_configured() -> bool:
     """是否配置了可用的 LLM 密钥"""

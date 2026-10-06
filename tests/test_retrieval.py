@@ -46,9 +46,18 @@ CORPUS = [
 ]
 
 
-def corpus_session():
-    """假 DB，直接返回固定语料"""
-    return FakeSession(result=FakeResult(rows=list(CORPUS)))
+_SHARED_SESSION = FakeSession(result=FakeResult(rows=list(CORPUS)))
+
+
+def shared_corpus_session():
+    """
+    模块级复用的 corpus session。
+
+    必须是同一个对象：BM25 索引和向量矩阵都以语料指纹为键做进程内缓存，
+    每次新建 corpus 会让指纹变化、缓存永远不命中，
+    测试会退化成「每次重建索引」，耗时拉长一个数量级。
+    """
+    return _SHARED_SESSION
 
 
 # ---------------- 分词 ----------------
@@ -280,7 +289,7 @@ def test_retrieve_falls_back_to_bm25_when_embedding_fails(monkeypatch):
     monkeypatch.setattr(retriever_module, "embed_texts", boom)
     monkeypatch.setattr(retriever_module, "embed_query", boom)
 
-    results, confident = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    results, confident = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
 
     assert results, "应仍能通过 BM25 召回"
     assert any(r.bm25_rank for r in results)
@@ -300,7 +309,7 @@ def test_retrieve_hybrid_merges_both_paths(monkeypatch):
     """向量路召回了 BM25 没召回的文档，两路应被合并"""
     import ai.retriever as retriever_module
 
-    async def fake_embed_texts(texts, use_cache=True):
+    async def fake_embed_texts(texts, use_cache=True, batch_lookup=False):
         # 第 0 条（铁路）与查询相似，第 3 条（油价）完全无关
         table = [
             [1.0, 0.0],
@@ -316,7 +325,7 @@ def test_retrieve_hybrid_merges_both_paths(monkeypatch):
     monkeypatch.setattr(retriever_module, "embed_texts", fake_embed_texts)
     monkeypatch.setattr(retriever_module, "embed_query", fake_embed_query)
 
-    results, confident = asyncio_run(retrieve(corpus_session(), "高铁新增班次", use_cache=False))
+    results, confident = asyncio_run(retrieve(shared_corpus_session(), "高铁新增班次", use_cache=False))
 
     assert confident
     assert results, "应有两路融合后的结果"
@@ -328,7 +337,7 @@ def test_retrieve_hybrid_merges_both_paths(monkeypatch):
 # ---------------- Prompt 构造 ----------------
 
 def test_build_context_numbers_articles_from_one():
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
     context = build_news_context(retrieved, limit=3)
 
     assert context.startswith("[1] 标题：")
@@ -336,7 +345,7 @@ def test_build_context_numbers_articles_from_one():
 
 
 def test_build_context_respects_limit():
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "的", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "的", use_cache=False))
     context = build_news_context(retrieved, limit=2)
 
     assert "[3] 标题：" not in context
@@ -352,7 +361,7 @@ def test_system_prompt_forbids_hallucination():
 
 
 def test_messages_structure_puts_context_before_question():
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
     messages = build_news_qa_messages("GDP是多少", retrieved)
 
     assert messages[0]["role"] == "system"
@@ -364,7 +373,7 @@ def test_messages_structure_puts_context_before_question():
 
 
 def test_messages_include_only_recent_history():
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
     history = [(f"第{i}轮提问", f"第{i}轮回答") for i in range(1, 6)]
 
     messages = build_news_qa_messages("当前问题", retrieved, history=history)
@@ -379,7 +388,7 @@ def test_messages_include_only_recent_history():
 # ---------------- 拒答 ----------------
 
 def test_refusal_message_lists_found_articles():
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
 
     message = build_refusal_message("某个问题", retrieved)
 
@@ -397,7 +406,7 @@ def test_refusal_message_with_no_results_suggests_alternative():
 
 def test_to_citation_exposes_news_id_for_traceability():
     """溯源信息必须带 news_id，前端才能跳回原文"""
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
 
     citation = retrieved[0].to_citation()
 
@@ -414,7 +423,7 @@ def test_to_citation_is_json_serializable():
     """
     import json
 
-    retrieved, _ = asyncio_run(retrieve(corpus_session(), "GDP", use_cache=False))
+    retrieved, _ = asyncio_run(retrieve(shared_corpus_session(), "GDP", use_cache=False))
 
     # 走到真正 json.dumps 这一步才算验证到
     encoded = json.dumps([item.to_citation() for item in retrieved], ensure_ascii=False)
