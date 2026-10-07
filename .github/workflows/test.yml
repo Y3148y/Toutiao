@@ -67,13 +67,6 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Import app and verify routes
-        run: |
-          python - <<'PY'
-          import main
-          paths = main.app.openapi()["paths"]
-          # 数量断言放在脚本文件里而不是 python -c 的内联字符串：
-          # 内联多行引号在 YAML 与 shell 之间容易出错，排查困难。
-          expected = 22
-          assert len(paths) == expected, f"期望 {expected} 条路由，实际 {len(paths)}"
-          print(f"OK: {len(paths)} paths")
-          PY
+        # 路由清单位于 scripts/check_routes.py，CI 和单元测试共用同一份。
+        # 之前两边各自硬编码路由数，加接口要改两处、漏一处就红，已经失败过两次。
+        run: python -m scripts.check_routes
