@@ -124,6 +124,124 @@ async def _record_chat_usage(usage: dict | None) -> None:
     )
 
 
+async def _stream_answer(
+    question: str, retrieved: list, confident: bool
+):
+    """
+    生成 SSE 事件序列。
+
+    独立成函数是为了能直接测帧序列 —— 这段逻辑里已经漏过两个真实 bug
+    （usage 帧读不到、done 事件发两次），都发生在测试覆盖不到的内联闭包里。
+
+    事件顺序：
+        sources -> token* -> done
+                  -> error（上游异常时）
+    """
+    # 先把溯源信息发出去。即使模型随后失败，前端也已经知道引用了哪些新闻
+    yield _sse("sources", {"sources": [item.to_citation() for item in retrieved]})
+
+    if not confident:
+        # 没有足够相关的内容，直接拒答，不调 LLM。
+        # 这是防幻觉最关键的一步：不给模型编造的机会。
+        yield _sse("token", {"content": build_refusal_message(question, retrieved)})
+        yield _sse("done", {"finishReason": "refused", "sourceCount": len(retrieved)})
+        return
+
+    messages = build_news_qa_messages(question, retrieved)
+    payload = {
+        "model": DASHSCOPE_CHAT_MODEL,
+        "messages": messages,
+        "stream": True,
+        # 必须显式要求返回 usage，否则成本闸门拿不到这次调用的 token 数。
+        "stream_options": {"include_usage": True},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
+            async with client.stream(
+                "POST",
+                f"{DASHSCOPE_BASE_URL}/chat/completions",
+                headers=auth_headers(stream=True),
+                json=payload,
+            ) as resp:
+                if resp.status_code != 200:
+                    detail = (
+                        (await resp.aread()).decode("utf-8", errors="replace")[:500]
+                    )
+                    logger.error("大模型返回 %s: %s", resp.status_code, detail)
+                    yield _sse("error", {"message": detail or "大模型服务返回异常"})
+                    return
+
+                # 不能在 finish_reason 帧就 return。
+                #
+                # 实测 DashScope 的帧序列是：
+                #   ...token... -> finish_reason 帧(usage=null)
+                #   -> 单独的 usage 帧(choices 为空) -> [DONE]
+                # usage 帧排在 finish_reason 之后，提前 return 就永远读不到，
+                # 结果流式请求完全不被计量：钱照扣、账上查不到。
+                # 同步版有 usage、流式版没有 —— 同一个功能两条路径行为不一致。
+                finish_reason = None
+                usage = None
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    chunk = line[6:]
+                    if chunk.strip() == "[DONE]":
+                        break
+                    try:
+                        parsed = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # usage 可能单独成帧，choices 为空，必须先取再跳过
+                    frame_usage = parsed.get("usage")
+                    if frame_usage:
+                        usage = frame_usage
+
+                    choices = parsed.get("choices") or []
+                    if not choices:
+                        continue
+                    content = (choices[0].get("delta") or {}).get("content")
+                    if content:
+                        yield _sse("token", {"content": content})
+                    if choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
+
+                if usage:
+                    await _record_chat_usage(usage)
+                else:
+                    # 没拿到 usage 要留痕。静默跳过等于账单凭空少一段，
+                    # 事后根本无从发现。
+                    logger.warning(
+                        "流式响应未返回 usage，本次调用无法计量（模型 %s）",
+                        DASHSCOPE_CHAT_MODEL,
+                    )
+
+                yield _sse(
+                    "done",
+                    {
+                        "finishReason": finish_reason or "stop",
+                        "sourceCount": len(retrieved),
+                        "usage": usage,
+                    },
+                )
+    except httpx.HTTPStatusError as exc:
+        # 上游的业务错误不能报成「连接失败」。
+        upstream = _upstream_error(exc.response)
+        logger.error("大模型返回错误 %s: %s", exc.response.status_code, upstream)
+        yield _sse(
+            "error",
+            {
+                "message": f"大模型服务返回错误({exc.response.status_code}): {upstream}",
+                "upstreamStatus": exc.response.status_code,
+            },
+        )
+    except httpx.HTTPError as exc:
+        logger.error("连接大模型服务失败: %s", exc)
+        yield _sse("error", {"message": "连接大模型服务失败，请稍后再试"})
+
+
 @router.post("/news-qa")
 async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
     """
@@ -143,92 +261,11 @@ async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db))
 
     retrieved, confident = await retrieve(db, req.question, top_k=req.top_k)
 
-    async def event_generator():
-        # 先把溯源信息发出去。即使模型随后失败，前端也已经知道引用了哪些新闻
-        yield _sse("sources", {"sources": [item.to_citation() for item in retrieved]})
-
-        if not confident:
-            # 没有足够相关的内容，直接拒答，不调 LLM。
-            # 这是防幻觉最关键的一步：不给模型编造的机会。
-            yield _sse("token", {"content": build_refusal_message(req.question, retrieved)})
-            yield _sse("done", {"finishReason": "refused", "sourceCount": len(retrieved)})
-            return
-
-        messages = build_news_qa_messages(req.question, retrieved)
-        payload = {"model": DASHSCOPE_CHAT_MODEL, "messages": messages, "stream": True}
-
-        try:
-            async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
-                async with client.stream(
-                    "POST",
-                    f"{DASHSCOPE_BASE_URL}/chat/completions",
-                    headers=auth_headers(stream=True),
-                    json=payload,
-                ) as resp:
-                    if resp.status_code != 200:
-                        detail = (await resp.aread()).decode("utf-8", errors="replace")[:500]
-                        logger.error("大模型返回 %s: %s", resp.status_code, detail)
-                        yield _sse("error", {"message": "大模型服务返回异常，请稍后再试"})
-                        return
-
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        chunk = line[6:]
-                        # [DONE] 是流结束标记，不是 JSON
-                        if chunk.strip() == "[DONE]":
-                            break
-                        try:
-                            parsed = json.loads(chunk)
-                        except json.JSONDecodeError:
-                            continue
-
-                        choices = parsed.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        content = delta.get("content")
-                        if content:
-                            yield _sse("token", {"content": content})
-                        finish_reason = choices[0].get("finish_reason")
-                        if finish_reason:
-                            # 流式的 usage 只在最后一帧出现，
-                            # 在这里计量而不是每个 token 都算一遍
-                            await _record_chat_usage(parsed.get("usage"))
-                            yield _sse(
-                                "done",
-                                {
-                                    "finishReason": finish_reason,
-                                    "sourceCount": len(retrieved),
-                                    "usage": parsed.get("usage"),
-                                },
-                            )
-                            return
-        except httpx.HTTPStatusError as exc:
-            # 和同步版同样的问题：上游的业务错误不能报成「连接失败」。
-            # 流式已经推出去 sources 事件了，这里只能通过 error 事件告知，
-            # 但至少要把真实原因带上。
-            upstream = _upstream_error(exc.response)
-            logger.error(
-                "大模型返回错误 %s: %s", exc.response.status_code, upstream
-            )
-            yield _sse(
-                "error",
-                {
-                    "message": f"大模型服务返回错误({exc.response.status_code}): {upstream}",
-                    "upstreamStatus": exc.response.status_code,
-                },
-            )
-            return
-        except httpx.HTTPError as exc:
-            logger.error("连接大模型服务失败: %s", exc)
-            yield _sse("error", {"message": "连接大模型服务失败，请稍后再试"})
-            return
-
-        # 流自然结束但没收到 finish_reason（少数网关会这样）
-        yield _sse("done", {"finishReason": "stop", "sourceCount": len(retrieved)})
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+    return StreamingResponse(
+        _stream_answer(req.question, retrieved, confident),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
 
 
 @router.post("/news-qa/sync")
