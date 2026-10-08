@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional
 
-from config.cache_conf import get_json_cache, set_cache, get_cache, icr, exp
+from config.cache_conf import get_json_cache, set_cache, get_cache, delete_cache, icr, exp
 
 CATEGORIES_KEY = "news:categories"
 NEWS_LIST_PREFIX = "news_list:"
@@ -44,6 +44,11 @@ async def set_cache_related_news(news_id: int, related_news: list, expire: int =
 async def get_cache_related_news(news_id: int):
     key = f"{NEWS_RELATED_PREFIX}{news_id}"
     return await get_json_cache(key)
+
+async def delete_cache_related_news(news_id: int):
+    """手工关联变更后必须调用，否则用户看到的还是旧推荐，直到 TTL 到期"""
+    key = f"{NEWS_RELATED_PREFIX}{news_id}"
+    return await delete_cache(key)
 
 async def get_news_views(news_id: int) -> int:
     key = f"news:views:{news_id}"

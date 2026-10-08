@@ -20,13 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # 业务接口清单 + 期望的 HTTP 方法。
 # 新增接口时改这里，测试和 CI 会一起生效。
 REQUIRED_ROUTES: dict[str, tuple[str, ...]] = {
-    # 新闻 6
+    # 新闻 9
     "/api/news/categories": ("get",),
     "/api/news/list": ("get",),
     "/api/news/detail": ("get",),
     "/api/news/feed": ("get",),
     "/api/news/search": ("get",),
     "/api/news/hot": ("get",),
+    "/api/news/related": ("post", "delete"),
+    "/api/news/related/list": ("get",),
     # 收藏 5
     "/api/favorite/check": ("get",),
     "/api/favorite/add": ("post",),
@@ -44,11 +46,12 @@ REQUIRED_ROUTES: dict[str, tuple[str, ...]] = {
     "/api/user/info": ("get",),
     "/api/user/update": ("put",),
     "/api/user/password": ("put",),
-    # AI 4
+    # AI 6
     "/api/ai/chat": ("post",),
     "/api/ai/news-qa": ("post",),
     "/api/ai/news-qa/sync": ("post",),
     "/api/ai/news-qa/reload": ("post",),
+    "/api/ai/news-qa/history": ("get", "delete"),
     # 根路径
     "/": ("get",),
 }

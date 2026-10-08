@@ -51,4 +51,19 @@ async def icr(key):
 async def exp(key, time=3600):
     await redis_client.expire(key, time)   # 1小时过期，可调
 
+async def delete_cache(key: str):
+    """
+    删除缓存。
+
+    之前没有删除接口，导致「运营改了配置但页面还是旧的」这类问题只能等
+    TTL 到期。新增这个后，关联关系变更能主动失效对应的推荐缓存。
+    """
+    try:
+        return bool(await redis_client.delete(key))
+    except Exception as e:
+        # 删缓存失败不能抛：调用方的数据已经写进库了，
+        # 让它因为缓存问题整体失败反而更糟
+        print(f"删除缓存失败：{e}")
+        return False
+
 

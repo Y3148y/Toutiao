@@ -46,14 +46,27 @@ def stub_redis(monkeypatch):
         "set_cache_news_list",
         "get_cache_news_detail",
         "set_cache_news_detail",
-        "get_cache_related_news",
-        "set_cache_related_news",
         "get_news_views",
         "init_news_views",
         "increment_news_views",
     ):
         mock = AsyncMock(return_value=None)
         monkeypatch.setattr(news_cache, name, mock)
+        mocks[name] = mock
+
+    # 相关推荐的缓存函数同时被 crud.news_cache（转发层）和 crud.related_news
+    # （真正实现）持有。两处打同一个 mock 对象，用例里写
+    # stub_redis["get_cache_related_news"].return_value = [...] 才对两边都生效。
+    from crud import related_news as related_crud
+
+    for name in (
+        "get_cache_related_news",
+        "set_cache_related_news",
+        "delete_cache_related_news",
+    ):
+        mock = mocks.get(name) or AsyncMock(return_value=None)
+        monkeypatch.setattr(news_cache, name, mock, raising=False)
+        monkeypatch.setattr(related_crud, name, mock, raising=False)
         mocks[name] = mock
     return mocks
 

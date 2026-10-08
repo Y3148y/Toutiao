@@ -3,11 +3,13 @@
 
 数据流：
     用户提问
+      → 取多轮上下文（登录读 ai_chat 表 / 匿名读 Redis）
       → 混合检索（BM25 + 向量 + RRF）拿到相关新闻
       → 置信度不足？直接拒答，不调 LLM
-      → 构造带约束的 prompt（附新闻编号）
+      → 构造带约束的 prompt（附新闻编号 + 历史轮次）
       → SSE 流式返回，token 逐字透传
       → 检索元信息（新闻ID溯源）作为首个事件下发
+      → 回答（含拒答）落库，供下一轮追问使用
 
 为什么要「先检索后回答」而不是直接问模型
 --------------------------------------
@@ -16,8 +18,9 @@
 再用 prompt 硬约束它只引用资料，才能让答案可溯源。
 """
 import json
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
@@ -32,6 +35,12 @@ from ai.config import (
     is_configured,
 )
 from ai.prompts import build_news_qa_messages, build_refusal_message
+from ai.qa_session import (
+    QaSession,
+    get_optional_user,
+    resolve_session,
+    take_anon_id,
+)
 from ai.retriever import retrieve
 from config.db_conf import get_db
 from utils.logging_conf import get_logger
@@ -125,7 +134,11 @@ async def _record_chat_usage(usage: dict | None) -> None:
 
 
 async def _stream_answer(
-    question: str, retrieved: list, confident: bool
+    question: str,
+    retrieved: list,
+    confident: bool,
+    history: list[tuple[str, str]] | None = None,
+    on_answer: Any = None,
 ):
     """
     生成 SSE 事件序列。
@@ -136,6 +149,10 @@ async def _stream_answer(
     事件顺序：
         sources -> token* -> done
                   -> error（上游异常时）
+
+    history   多轮上下文 [(提问, 回答), ...]
+    on_answer 生成结束后调用的回调 async (answer: str) -> None，
+              用于落库。落库失败不能影响 SSE 输出，所以回调内部要自己兜住异常。
     """
     # 先把溯源信息发出去。即使模型随后失败，前端也已经知道引用了哪些新闻
     yield _sse("sources", {"sources": [item.to_citation() for item in retrieved]})
@@ -143,11 +160,15 @@ async def _stream_answer(
     if not confident:
         # 没有足够相关的内容，直接拒答，不调 LLM。
         # 这是防幻觉最关键的一步：不给模型编造的机会。
-        yield _sse("token", {"content": build_refusal_message(question, retrieved)})
+        refusal = build_refusal_message(question, retrieved)
+        yield _sse("token", {"content": refusal})
         yield _sse("done", {"finishReason": "refused", "sourceCount": len(retrieved)})
+        # 拒答也要落库：用户问了、系统拒了，这是有价值的历史。
+        # 跳过会让多轮上下文断裂 —— 用户追问「那换个问法」时模型不知道之前拒过。
+        await _safe_record(on_answer, refusal)
         return
 
-    messages = build_news_qa_messages(question, retrieved)
+    messages = build_news_qa_messages(question, retrieved, history)
     payload = {
         "model": DASHSCOPE_CHAT_MODEL,
         "messages": messages,
@@ -182,6 +203,7 @@ async def _stream_answer(
                 # 同步版有 usage、流式版没有 —— 同一个功能两条路径行为不一致。
                 finish_reason = None
                 usage = None
+                answer_parts: list[str] = []
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
@@ -204,6 +226,7 @@ async def _stream_answer(
                         continue
                     content = (choices[0].get("delta") or {}).get("content")
                     if content:
+                        answer_parts.append(content)
                         yield _sse("token", {"content": content})
                     if choices[0].get("finish_reason"):
                         finish_reason = choices[0]["finish_reason"]
@@ -226,6 +249,7 @@ async def _stream_answer(
                         "usage": usage,
                     },
                 )
+                await _safe_record(on_answer, "".join(answer_parts))
     except httpx.HTTPStatusError as exc:
         # 上游的业务错误不能报成「连接失败」。
         upstream = _upstream_error(exc.response)
@@ -242,8 +266,27 @@ async def _stream_answer(
         yield _sse("error", {"message": "连接大模型服务失败，请稍后再试"})
 
 
+async def _safe_record(on_answer: Any, answer: str) -> None:
+    """执行落库回调，异常一律吞掉。
+
+    到这一步模型的钱已经花了、答案也已经推给用户了。
+    如果因为写库失败让接口返回 500，用户什么都没拿到 —— 那才是真正的损失。
+    """
+    if on_answer is None:
+        return
+    try:
+        await on_answer(answer)
+    except Exception as exc:
+        logger.warning("问答历史落库失败（不影响本次回答）: %s", exc)
+
+
 @router.post("/news-qa")
-async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
+async def news_qa_stream(
+    req: NewsQaRequest,
+    db: AsyncSession = Depends(get_db),
+    user: Any | None = Depends(get_optional_user),
+    anon_id: str | None = Depends(take_anon_id),
+):
     """
     基于新闻语料的问答，SSE 流式返回。
 
@@ -259,21 +302,37 @@ async def news_qa_stream(req: NewsQaRequest, db: AsyncSession = Depends(get_db))
             detail="服务器未配置 DASHSCOPE_API_KEY 环境变量",
         )
 
-    retrieved, confident = await retrieve(db, req.question, top_k=req.top_k)
+    session = await resolve_session(db, user, anon_id)
+    history = await session.load_history(db)
+    retrieved, confident = await retrieve(
+        db, req.question, top_k=req.top_k, history=history
+    )
 
+    headers = {**SSE_HEADERS, **session.response_headers()}
     return StreamingResponse(
-        _stream_answer(req.question, retrieved, confident),
+        _stream_answer(
+            req.question,
+            retrieved,
+            confident,
+            history=history,
+            on_answer=session.recorder(db, req.question),
+        ),
         media_type="text/event-stream",
-        headers=SSE_HEADERS,
+        headers=headers,
     )
 
 
 @router.post("/news-qa/sync")
-async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
+async def news_qa_sync(
+    req: NewsQaRequest,
+    db: AsyncSession = Depends(get_db),
+    user: Any | None = Depends(get_optional_user),
+    anon_id: str | None = Depends(take_anon_id),
+):
     """
     同步版本的新闻问答，一次性返回完整答案。
 
-    与流式版共用检索和 prompt 逻辑，方便非流式场景（比如脚本调用、
+    与流式版共用检索、prompt、会话逻辑，方便非流式场景（脚本调用、
     不支持 SSE 的客户端）使用，也便于写断言做集成测试。
     """
     if not is_configured():
@@ -282,18 +341,29 @@ async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
             detail="服务器未配置 DASHSCOPE_API_KEY 环境变量",
         )
 
-    retrieved, confident = await retrieve(db, req.question, top_k=req.top_k)
+    session = await resolve_session(db, user, anon_id)
+    history = await session.load_history(db)
+    retrieved, confident = await retrieve(
+        db, req.question, top_k=req.top_k, history=history
+    )
+    record = session.recorder(db, req.question)
+    extra_headers = session.response_headers()
 
     if not confident:
+        refusal = build_refusal_message(req.question, retrieved)
+        # 拒答同样落库：用户问了、系统拒了，这是有价值的历史。
+        # 跳过会让多轮断裂 —— 用户追问「换个问法」时模型不知道之前拒过。
+        await _safe_record(record, refusal)
         return success_response(
             data={
-                "answer": build_refusal_message(req.question, retrieved),
+                "answer": refusal,
                 "refused": True,
                 "sources": [item.to_citation() for item in retrieved],
-            }
+            },
+            headers=extra_headers,
         )
 
-    messages = build_news_qa_messages(req.question, retrieved)
+    messages = build_news_qa_messages(req.question, retrieved, history)
     payload = {"model": DASHSCOPE_CHAT_MODEL, "messages": messages, "stream": False}
 
     try:
@@ -334,6 +404,7 @@ async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
 
     usage = data.get("usage")
     await _record_chat_usage(usage)
+    await _safe_record(record, answer)
 
     return success_response(
         data={
@@ -341,7 +412,8 @@ async def news_qa_sync(req: NewsQaRequest, db: AsyncSession = Depends(get_db)):
             "refused": False,
             "sources": [item.to_citation() for item in retrieved],
             "usage": usage,
-        }
+        },
+        headers=extra_headers,
     )
 
 
@@ -350,3 +422,79 @@ async def reload_corpus(db: AsyncSession = Depends(get_db)):
     """强制重新载入新闻语料并回写缓存（语料有变更时用）"""
     rows = await retrieve(db, "刷新", top_k=1, use_cache=False)
     return success_response(message="语料缓存已刷新", data={"hit": bool(rows[1])})
+
+
+@router.get("/news-qa/history")
+async def list_qa_history(
+    limit: int = Query(20, ge=1, le=100, description="返回条数，最新在前"),
+    db: AsyncSession = Depends(get_db),
+    user: Any | None = Depends(get_optional_user),
+    anon_id: str | None = Depends(take_anon_id),
+):
+    """
+    问答历史。
+
+    登录用户读 ai_chat 表（跨设备、长期保留）；
+    未登录读 Redis 里本会话的最近几轮（24 小时 TTL）。
+
+    不带登录态也不带 X-Anonymous-Id 时返回空列表而不是 401 ——
+    历史本身是可选增强，让它成为使用前提不合理。
+    """
+    session = await resolve_session(db, user, anon_id)
+    headers = session.response_headers()
+
+    if session.is_logged_in:
+        from crud import ai_chat as ai_chat_crud
+
+        try:
+            rows = await ai_chat_crud.list_history(db, session.user_id, limit)
+            items = [
+                {
+                    "id": row.id,
+                    "question": row.message,
+                    "answer": row.response,
+                    "createdAt": row.created_at.isoformat(),
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.warning("读取问答历史失败: %s", exc)
+            items = []
+        return success_response(
+            data={"list": items, "total": len(items)}, headers=headers
+        )
+
+    turns = await session.load_history(db)
+    items = [
+        {"question": q, "answer": a, "createdAt": None} for q, a in reversed(turns)
+    ]
+    return success_response(data={"list": items, "total": len(items)}, headers=headers)
+
+
+@router.delete("/news-qa/history")
+async def clear_qa_history(
+    db: AsyncSession = Depends(get_db),
+    user: Any | None = Depends(get_optional_user),
+    anon_id: str | None = Depends(take_anon_id),
+):
+    """清空问答历史（登录清库、匿名清 Redis 会话）"""
+    session = await resolve_session(db, user, anon_id)
+    headers = session.response_headers()
+
+    if session.is_logged_in:
+        from crud import ai_chat as ai_chat_crud
+
+        try:
+            removed = await ai_chat_crud.clear_history(db, session.user_id)  # type: ignore[arg-type]
+        except Exception as exc:
+            logger.warning("清空问答历史失败: %s", exc)
+            removed = 0
+    else:
+        from ai import anon_history
+
+        await anon_history.clear_history(session.anon_id or "")
+        removed = -1  # 匿名场景不暴露条数（Redis DEL 不返回原长度）
+
+    return success_response(
+        message="历史已清空", data={"removed": removed}, headers=headers
+    )

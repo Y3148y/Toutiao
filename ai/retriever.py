@@ -64,7 +64,7 @@ from ai.config import (
 )
 from ai.embeddings import VectorMatrix, embed_query, embed_texts
 from ai.ingest.manifest import IndexManifest
-from ai.ingest.validate import corpus_fingerprint
+from ai.ingest.validate import corpus_fingerprint, document_content_hash
 from config.cache_conf import redis_client
 from models.news import News
 from utils.logging_conf import get_logger
@@ -252,6 +252,11 @@ def bm25_search(
        「人工智能」共享「计」「算」这类字，加上「的/中/国」这种高频字，
        任何两条新闻之间都能凑出几个共同单字。只靠单字命中的结果全是误召回，
        会让无关问题也走上LLM，然后靠模型去编。所以必须命中二元组或 ASCII 词。
+
+    **写小语料的单元测试时注意**：rank_bm25 的 IDF 在查询词出现在过半文档时
+    会变成负数，配合第 1 条过滤会把所有结果清空，表现为「BM25 永远返回空」。
+    只有 3~8 篇语料时几乎必然触发 —— 造测试数据要补够无关文档，
+    别把这个现象误判成检索功能坏了。
     """
     if not corpus:
         return []
@@ -621,12 +626,17 @@ async def retrieve(
     top_k: int = TOP_K_FINAL,
     use_cache: bool = True,
     trace: RetrievalTrace | None = None,
+    history: list[tuple[str, str]] | None = None,
 ) -> tuple[list[RetrievedNews], bool]:
     """
     对新闻语料执行混合检索。
 
     返回 (召回列表, 是否达到置信度阈值)。
     第二个返回值供调用方判断：没达到就该直接拒答，不要调 LLM 去编。
+
+    history 传入上一轮问答后，检索词会带上轮的关键词。
+    这一步是必需的：多轮追问（「那人均呢」）本身没有检索词，
+    只靠原句检索必然召回不到任何东西 —— 上下文只喂给生成层是不够的。
     """
     trace = trace or RetrievalTrace(query)
     import time as _time
@@ -644,13 +654,27 @@ async def retrieve(
     trace.fingerprint = _corpus_fingerprint(corpus)
     trace.threshold = MIN_FUSION_SCORE
 
+    # 检索词改写：把上一轮的问题并进当前 query。
+    #
+    # 为什么必须做：追问句本身几乎没有检索词。「那人均呢」拿去搜 BM25 和
+    # 向量都搜不到 GDP 相关内容 —— 实测会直接触发拒答，而用户看到的是
+    # 「这个系统听不懂追问」。上下文只喂给生成层是不够的，检索层也要用。
+    search_query = query
+    if history:
+        previous_question = history[-1][0]
+        # 只带上一轮的问题，不带回答：回答里的字会大量稀释本轮的检索意图
+        # （实测回答里有 [1][2] 和整段叙述，拼进去会把召回带偏）
+        if previous_question and previous_question.strip():
+            search_query = f"{previous_question} {query}"
+            logger.info("多轮检索词改写: %r -> %r", query, search_query)
+
     t0 = _time.perf_counter()
-    bm25_hits = bm25_search(corpus, query)
+    bm25_hits = bm25_search(corpus, search_query)
     trace.bm25_ms = (_time.perf_counter() - t0) * 1000
     trace.bm25_hits = len(bm25_hits)
 
     t0 = _time.perf_counter()
-    vector_hits = await vector_search(corpus, query)
+    vector_hits = await vector_search(corpus, search_query)
     trace.vector_ms = (_time.perf_counter() - t0) * 1000
     trace.vector_hits = len(vector_hits)
     # 有 BM25 命中但向量一路空 = 向量服务不可用，已降级
@@ -669,9 +693,24 @@ async def retrieve(
 
     fused = reciprocal_rank_fusion([list(bm25_rank.keys()), list(vector_rank.keys())])
 
+    # 召回后按内容去重。
+    #
+    # 真实语料里有 15 组共 33 篇标题/描述/正文完全相同的新闻。索引侧
+    # 已经把 content_hash 改成一对多映射，33 篇都能进索引；但它们在检索
+    # 侧是同一份知识，重复召回会挤占 top_k 名额 —— 实测出现过拒答消息里
+    # 连续列出三条《中国数字阅读用户规模超5.3亿》，既浪费额度又难看。
+    #
+    # 保留每组里融合分最高的那条（也就是最相关的），其余丢弃。
     results: list[RetrievedNews] = []
-    for idx, fusion_score in sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:top_k]:
+    seen_hashes: set[str] = set()
+    for idx, fusion_score in sorted(fused.items(), key=lambda kv: kv[1], reverse=True):
+        if len(results) >= top_k:
+            break
         news = corpus[idx]
+        content_hash = document_content_hash(news.title, news.description, news.content)
+        if content_hash in seen_hashes:
+            continue
+        seen_hashes.add(content_hash)
         _, terms = bm25_meta.get(idx, (0.0, []))
         excerpt = (news.content or news.description or "")[:MAX_DOC_CHARS]
         results.append(

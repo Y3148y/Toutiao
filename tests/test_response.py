@@ -130,4 +130,4 @@ def test_openapi_documents_all_endpoints():
     actual, problems = check()
 
     assert not problems, "路由自检未通过：\n  " + "\n  ".join(problems)
-    assert actual == 25
+    assert actual == 28

@@ -6,6 +6,7 @@ from crud import news
 from crud import news_cache
 from crud import news_feed
 from crud import news_search
+from crud import related_news as related_crud
 from models.users import User
 from schemas.news import (
     HotNewsItem,
@@ -15,7 +16,12 @@ from schemas.news import (
     NewsSearchItem,
     NewsSearchResponse,
 )
-from utils.auth import get_optional_user
+from schemas.related_news import (
+    RelatedNewsCreate,
+    RelatedNewsCreateResponse,
+    RelatedNewsResponse,
+)
+from utils.auth import get_current_user, get_optional_user
 from utils.response import success_response
 
 router = APIRouter(prefix="/api/news", tags=["news"])
@@ -184,3 +190,62 @@ async def read_news_detail(news_id: int=Query(..., alias="id"),
         "views": views,
         "relatedNews": related_news
     })
+
+
+# ---------------------------------------------------------------- 相关推荐维护
+#
+# related_news 表是之前建好但一直没接代码的：详情页一直走「同分类 + 浏览量」
+# 的实时查询，运营无法控制推荐什么。现在接上：手工配的优先，配了没配的
+# 自动回落实时查询，保证推荐位不为空。
+
+
+@router.get("/related/list", response_model=RelatedNewsResponse)
+async def list_related(
+    news_id: int = Query(..., alias="newsId"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出手工关联的新闻 id（运营后台编辑页回显用）"""
+    ids = await related_crud.list_related_ids(db, news_id)
+    return success_response(data=RelatedNewsResponse(relatedNewsIds=ids))
+
+
+@router.post("/related", response_model=RelatedNewsCreateResponse)
+async def create_related(
+    data: RelatedNewsCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    新增关联（需登录）。
+
+    重复添加返回 created=false 而不是报错 —— 运营后台反复点同一个按钮
+    不该攒出一堆重复行，接口也要能安全重试。
+    """
+    try:
+        created, news_id = await related_crud.add_related(
+            db, data.news_id, data.related_news_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    ids = await related_crud.list_related_ids(db, news_id)
+    return success_response(
+        data=RelatedNewsCreateResponse(created=created, relatedNewsIds=ids)
+    )
+
+
+@router.delete("/related", response_model=RelatedNewsCreateResponse)
+async def delete_related(
+    news_id: int = Query(..., alias="newsId"),
+    related_news_id: int = Query(..., alias="relatedNewsId"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除关联（需登录）"""
+    removed = await related_crud.remove_related(db, news_id, related_news_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="关联不存在")
+
+    ids = await related_crud.list_related_ids(db, news_id)
+    return success_response(data=RelatedNewsCreateResponse(created=True, relatedNewsIds=ids))

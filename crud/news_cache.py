@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy import func
 from sqlalchemy import update
 from models.base import NewsItemBase, NewsItemFull
+from crud import related_news as related_crud
 
 
 # 返回dict
@@ -104,32 +105,10 @@ async def increase_news_news(db: AsyncSession, news_id: int):
 
 
 async def get_related_news(db: AsyncSession, news_id: int, category_id: int, limit: int = 5):
-    # 查缓存
-    cached_related = await get_cache_related_news(news_id)
-    if cached_related:
-        return cached_related
+    """
+    相关推荐。转发到 crud/related_news 的实现。
 
-    stmt = select(News).where(
-        News.id != news_id,
-        News.category_id == category_id
-    ).order_by(
-        News.views.desc(), # 降序
-        News.publish_time.desc()
-    ).limit(limit)
-    result = await db.execute(stmt)
-    # return result.scalars().all()
-    related_news = result.scalars().all()
-    related_news = [{
-            "id": news.id,
-            "title": news.title,
-            "content": news.content,
-            "image": news.image,
-            "author": news.author,
-            "publishTime": news.publish_time,
-            "categoryId": news.category_id,
-            "views": news.views,
-    } for news in related_news]
-
-    # 写缓存（jsonable_encoder 处理 datetime 字段）
-    await set_cache_related_news(news_id, jsonable_encoder(related_news))
-    return related_news
+    真正的实现在那边（手工关联优先、实时查询兜底）。这里保留转发是为了
+    不改动 routers/news.py 的调用方式 —— 外部代码 import 的是这个路径。
+    """
+    return await related_crud.get_related_news(db, news_id, category_id, limit)
