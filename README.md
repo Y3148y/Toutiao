@@ -2,6 +2,9 @@
 
 基于 FastAPI 构建的异步新闻资讯后端服务，提供用户认证、新闻浏览、收藏、历史记录、AI 问答等完整功能。
 
+> 📋 **准备面试 / 想把这个项目写进简历？**
+> 技术实现看本文，**话术和追问准备看 [`interview/`](interview/README.md)** —— 里面有简历写法、项目介绍话术、RAG 八股文和高频面试题（含踩坑提示）。
+
 ## 技术栈
 
 | 技术 | 版本/说明 |
@@ -202,8 +205,11 @@ toutiao_backend/
 
 ```
 用户提问
+  → 多轮检索词改写（把上一轮问题并入当前 query）
   → 混合检索（BM25 词面 + 向量语义 + RRF 融合）召回相关新闻
-  → 融合得分低于置信阈值？→ 直接拒答，不调用 LLM
+  → 内容哈希去重（同 hash 只留融合分最高的一条）
+  → 三级置信判控（向量余弦 → BM25 分数 → RRF 兜底）
+  → 未达阈值？→ 直接拒答，不调用 LLM
   → 构造带约束的 prompt（新闻编号 + 来源）
   → SSE 流式返回，token 逐字透传
   → 溯源信息作为首个事件下发
@@ -224,7 +230,13 @@ toutiao_backend/
 | **BM25 词面** | 专有名词、数字、缩写。`GDP 增长5.2%` 只有词面能精确命中 | 同义表述零字面重叠 |
 | **向量语义** | 跨越表述差异。「高铁延长运行时间」vs「动车组新增班次」 | 对专名不敏感，容易泛化 |
 
-实测常见结论：单用向量会漏专名查询，单用 BM25 会漏同义表述，融合后召回率显著高于任一单路。
+**为什么两路都要（设计动机）**：失败模式互补 —— BM25 不可替代的是专名/数字，向量不可替代的是跨表述检索。
+
+⚠️ **但实测结论要说清楚**：在本项目 403 篇语料、55 条用例的评估集上，
+**向量路对召回率零增益** —— BM25 单路、向量单路、融合三者的 TOP5 命中数完全相同（均为 49）；
+融合排名与 BM25 不同 46/55 条（83.6%），说明它确实在重排，但一次都没改变「答案是否进 TOP5」。
+原因是小语料上 BM25 召回已接近饱和。**不是向量没用，是这个规模区分不出差别。**
+详见 `ai/eval/README.md`。
 
 **为什么用 RRF 而不是直接相加分数**：BM25 分数无上界，向量余弦在[-1,1]，量纲不同不能相加。RRF 只依赖排名不看分数：`score(d) = Σ 1/(k + rank)`，k=60 是原论文经验值，作用是压制头部排名的过度影响。
 
@@ -232,9 +244,7 @@ toutiao_backend/
 
 1. **中文分词要求至少命中一个多字词**。纯单字命中是噪声 —— 「量子计算机」和「人工智能」共享「计」「算」，加上「的/中/国」这类高频字，任何两条新闻之间都能凑出共同单字。只靠单字命中的结果直接丢弃，否则无关问题也会走上 LLM。
 
-2. **单路命中的融合得分打 5 折**。两路都命中说明「从词面和语义两个角度都认为相关」，只有一路命中证据不足。
-   单路最高分 `0.5/(60+1) ≈ 0.008`，双路最高分 `2/(60+1) ≈ 0.033`，置信阈值取 `0.02` 卡在两者之间。
-   副作用要清楚：**向量服务不可用时系统进入保守模式，宁可拒答也不冒险让模型编。**
+2. **RRF 融合分不能当置信信号**。它只用排名、丢弃分数幅度，403 篇小语料里几乎任何查询都能凑出双路命中，分数一律顶到上限 `2/(60+1)=0.0328`，正例中位 0.0328 与负例中位 0.0325 **完全重叠** —— 原来按 `0.02` 卡阈值时负例误召回率实测 100%，一条都没拦住。改用三级判控后降到 16.7%，且召回无损失（详见 `ai/eval/README.md`）。
 
 3. **Prompt 硬约束**：只能依据给定资料作答，资料没有就明说不知道，每条结论标注来源编号，多篇说法不一致时如实说明而不自行判断。
 
@@ -260,12 +270,14 @@ toutiao_backend/
 ```
 timing  : {'bm25Ms': 2.07, 'vectorMs': 302.18, 'fuseMs': 0.09, 'totalMs': 304.35}
 recall  : {'bm25Hits': 20, 'vectorHits': 0, 'vectorAvailable': False, 'degradedToBm25': True}
-decision: {'topScore': 0.008197, 'threshold': 0.02, 'confident': False, 'willRefuse': True}
-top1    : id=44 score=0.008197 bm25=1 vec=None single=True terms=['高铁']
+decision: {'topScore': 10.65, 'threshold': 40.0, 'confident': False, 'willRefuse': True,
+           'gateMode': 'bm25_score'}
+top1    : id=44 fusionScore=0.008197 bm25=1 vec=None single=True terms=['高铁']
 ```
 
-能回答四类问题：慢在哪、**是否已降级为纯 BM25**、为什么拒答、命中了哪些词。
+能回答五类问题：慢在哪、**是否已降级为纯 BM25**、**用的是哪级判据**、为什么拒答、命中了哪些词。
 `degradedToBm25` 用来发现「以为在跑混合检索，实际向量路没生效」这种静默故障。
+`gateMode` 区分 `vector_cosine` / `bm25_score` / `none`；**`topScore` 的量纲随判据变化**（余弦 0~1、BM25 几十、RRF 0.03 量级），读 trace 必须先看它。
 
 排查时按用户报的 `X-Request-ID` 取：
 ```bash
@@ -542,11 +554,11 @@ export DASHSCOPE_EMBED_MODEL=qwen3.7-text-embedding
 # 新闻问答检索参数
 export AI_TOP_K_BM25=20          # BM25 每路召回条数
 export AI_TOP_K_VECTOR=20        # 向量每路召回条数
-export AI_TOP_K_FINAL=5# 喂给 LLM 的新闻条数
+export AI_TOP_K_FINAL=5           # 喂给 LLM 的新闻条数
 export AI_RRF_K=60                # RRF 平滑常数
-export AI_SINGLE_PATH_WEIGHT=0.5  # 单路命中惩罚系数
+export AI_SINGLE_PATH_WEIGHT=0.5  # 单路命中惩罚系数（实测五档无效，保留默认值）
 export AI_MIN_VECTOR_SIM=0.55    # 置信门控（主判据）：向量 top-1 余弦下限
-export AI_MIN_BM25_SCORE=40.0   # 降级判据：向量路不可用时改用 BM25 分数
+export AI_MIN_BM25_SCORE=40.0    # 降级判据：向量路不可用时改用 BM25 分数
 export AI_MIN_FUSION_SCORE=0.02  # 兜底判据：RRF 融合分（实测无区分度，仅保底）
 export AI_MAX_DOC_CHARS=400       # 每条新闻最多取多少字进上下文
 export AI_TRACE_ENABLED=false     # 开启后按 request_id 把检索链路落到 Redis

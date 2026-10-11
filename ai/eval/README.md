@@ -73,7 +73,7 @@ python -m ai.eval.runner --sweep --top-k 5
 
 BM25 各阶段平均耗时 **56.2ms**（含 tokenize 全部 403 篇 + 每次重建索引）。
 
-### 加一条无语义假向量后
+### 加一条无语义假向量后（⚠️ 本节结论已作废）
 
 | 指标 | BM25 单路 | +假向量 |
 |---|---|---|
@@ -82,8 +82,13 @@ BM25 各阶段平均耗时 **56.2ms**（含 tokenize 全部 403 篇 + 每次重�
 | nDCG@5 | 91.4% | 60.3% |
 | 拒答准确率 | 100% | 50% |
 
-**MRR 腰斩**是这组数据最有价值的部分：它量化了「一路坏路会拖垮另一路」。
-假向量没有语义，把 BM25 本来排第 1 的文档挤了下去，排序质量崩塌。
+> ⚠️ **这里的「MRR 腰斩」是假向量造成的伪影，不是融合机制的真实缺陷。**
+> 用真实 embedding 复测后，融合与 BM25 单路的 TOP5 命中数完全相同（均为 49），
+> 融合排名与 BM25 不同 46/55 条 —— 说明融合在重排，但**没有**「一路坏路拖垮另一路」。
+> 相应地，`SINGLE_PATH_WEIGHT` 的设计前提不成立（见「三个必须写清楚的负面结论」第 2 条）。
+>
+> **保留这张表的意义是反面教材**：假向量适合让 CI 免调用付费 API，
+> 但**绝不能用来下结论** —— 这里的错误判断曾让我一度以为必须加单路保护。
 
 ---
 
@@ -225,17 +230,24 @@ trace keys: 1 ['ai:trace:edb1ad39']
   query  : 高铁新增班次
   timing : {'bm25Ms': 2.07, 'vectorMs': 302.18, 'fuseMs': 0.09, 'totalMs': 304.35}
   recall : {'bm25Hits': 20, 'vectorHits': 0, 'vectorAvailable': False, 'degradedToBm25': True}
-  decision: {'topScore': 0.008197, 'threshold': 0.02, 'confident': False, 'willRefuse': True}
+  decision: {'topScore': 10.65, 'threshold': 40.0, 'confident': False, 'willRefuse': True,
+             'gateMode': 'bm25_score'}
   results: 5 singlePath: 5
-  top1   : id=44 score=0.008197 bm25=1 vec=None single=True terms=['高铁']
+  top1   : id=44 fusionScore=0.008197 bm25=1 vec=None single=True terms=['高铁']
 ```
+
+> `gateMode` 是后加的字段，取值 `vector_cosine` / `bm25_score` / `none`。
+> 上例向量路不可用，判据自动降级为 BM25 分数。**注意 `topScore` 的量纲随判据变化**：
+> 余弦是 0~1、BM25 是几十、RRF 是 0.03 量级 —— 看 trace 必须先看 `gateMode`，
+> 否则会把「10.65 比 40 小」误读成判据失效（实际是该问题证据不足，正确拒答）。
 
 能回答的问题：
 
 - **慢在哪** —— 各阶段耗时独立统计
 - **是否降级** —— `degradedToBm25` 标记「以为在跑混合检索，实际向量路没生效」
-- **为什么拒答** —— `topScore` vs `threshold` 的实际数值
-- **单路命中被降权** —— 每条结果的 `singlePath` 标记，能定位「为什么分数这么低」
+- **用了哪级判据** —— `gateMode` 区分主判据 / 降级判据 / 无判据
+- **为什么拒答** —— `topScore` vs `threshold` 的实际数值（注意两者量纲随判据变化）
+- **单路命中被降权** —— 每条结果的 `singlePath` 标记，能定位「为什么融合分这么低」
 - **命中了哪些词** —— `matchedTerms`，用于诊断分词质量
 
 排查时直接按用户报的 `X-Request-ID` 取：`redis-cli -n 3 GET "ai:trace:<request_id>"`。
@@ -248,8 +260,13 @@ trace keys: 1 ['ai:trace:edb1ad39']
 
 | 问题 | 状态 |
 |---|---|
-| `MIN_FUSION_SCORE` 阈值标定 | **仍未解决**。需真实 API Key 跑 `--vector-real`；单路模式下 0.008~0.012 是断崖，无可调空间 |
-| 评估集未人工校验 | gold 按标题反推，衡量的是词面命中而非语义正确性 |
-| 融合机制缺单路保护 | 假向量使 MRR 腰斩（90.5% → 50.7%），一路退化会拖垮另一路 |
+| 忠实度未测 | 只测了检索层（召回/拒答），没验证生成内容是否忠于证据 |
+| 评估集未人工校验 | gold 按标题反推，衡量的是词面命中而非语义正确性；55 条也只够看趋势 |
+| 向量路零增益 | 本评估集区分不出（BM25 已接近饱和），需更大语料才能验证其价值 |
+| `SINGLE_PATH_WEIGHT` 未验证 | 五档扫描结果全同（49 / 44.33），当前无法证明有效 |
 | CI 门禁较弱 | 实测两次注入缺陷均未拦住，只挡「检索彻底失效」 |
-| 离线管线缺失 | 无文档解析、无分块、无批量 embedding 作业、无索引版本管理 |
+| 热榜未验真实分布 | 排序公式在可控数据上设计，未用真实点击/浏览分布检验 |
+
+> 本轮**已解决**：阈值标定（原 `MIN_FUSION_SCORE=0.02` 已改为三级判据，见上文）、
+> 「融合缺单路保护」（该结论系假向量伪影，已作废）、离线管线缺失
+> （`ai/ingest` 已提供 validate/build/snapshots/index-status/clear/cost 与索引版本管理）。
