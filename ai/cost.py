@@ -224,3 +224,47 @@ async def reset_usage() -> None:
         await redis_client.delete(_USAGE_KEY)
     except Exception as exc:
         logger.warning("清空用量失败: %s", exc)
+
+
+async def record_chat_usage(model: str, usage: dict | None) -> None:
+    """
+    把一次大模型调用的 token 用量计入成本闸门。
+
+    抽出来是因为**所有**直连大模型的入口都必须走这里：
+    `/api/ai/news-qa`（同步 + 流式）和 `/api/ai/chat` 都会真实产生费用，
+    任何一个入口绕过计量，成本就会少算一段，而账单还在照扣。
+
+    DeepSeek 系模型普通输入 元1/M 是缓存命中价 元0.2/M 的 5 倍，
+    而 system prompt 每次请求都完全相同 —— 缓存命中率直接决定成本。
+    所以把 cached_tokens 单独记下来，缓存没生效时能立刻看出来。
+
+    实测结论：百炼隐式缓存要求前缀 >= 1024 token（详见 ai/config.py）。
+    news-qa 真实请求的前缀（system 约 200 token + 检索上下文约 700 token）
+    低于该门槛，cached_tokens 恒为 0，日志里缓存命中率一直是 0% 属于预期，
+    不是配置错误 —— 别再花时间调这个。
+
+    预算超限时抛 BudgetExceeded，由调用方决定映射成什么状态码
+    （news_qa 返回 429 告诉调用方是预算问题而非服务故障）。
+    """
+    if not usage:
+        return
+
+    details = usage.get("prompt_tokens_details") or {}
+    try:
+        snap = await record_usage(
+            model,
+            input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0),
+            cached_input_tokens=int(details.get("cached_tokens") or 0),
+        )
+    except BudgetExceeded as exc:
+        # 已超预算。这次调用的钱已经付了，但继续服务只会越欠越多。
+        logger.error("预算超限: %s", exc)
+        raise
+
+    logger.info(
+        "%s 计量 %s 缓存命中率 %.0f%%",
+        model,
+        snap.describe(),
+        snap.cache_hit_ratio * 100,
+    )

@@ -99,27 +99,14 @@ async def _record_chat_usage(usage: dict | None) -> None:
     """
     把一次问答的 token 用量计入成本闸门。
 
-    DeepSeek 系模型普通输入 元1/M 是缓存命中价 元0.2/M 的 5 倍，
-    而 system prompt 每次请求都完全相同 —— 缓存命中率直接决定成本。
-    所以把 cached_tokens 单独记下来，缓存没生效时能立刻看出来。
-
-    实测结论：百炼隐式缓存要求前缀 >= 1024 token（详见 ai/config.py）。
-    我们真实请求的前缀（system 约 200 token + 检索上下文约 700 token）
-    低于该门槛，cached_tokens 恒为 0。日志里缓存命中率一直是 0% 属于预期，
-    不是配置错误 —— 别再花时间调这个。
+    真正的实现在 ai/cost.record_chat_usage —— `/api/ai/chat` 也走同一个，
+    避免两个直连大模型的入口各写一份计量逻辑而漏计。
+    这里只负责把「预算超限」翻译成 429。
     """
-    if not usage:
-        return
-    from ai.cost import BudgetExceeded, record_usage
+    from ai.cost import BudgetExceeded, record_chat_usage
 
-    details = usage.get("prompt_tokens_details") or {}
     try:
-        snap = await record_usage(
-            DASHSCOPE_CHAT_MODEL,
-            input_tokens=int(usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("completion_tokens") or 0),
-            cached_input_tokens=int(details.get("cached_tokens") or 0),
-        )
+        await record_chat_usage(DASHSCOPE_CHAT_MODEL, usage)
     except BudgetExceeded as exc:
         # 已超预算。这次调用的钱已经付了，但继续服务只会越欠越多，
         # 明确返回 429 让调用方知道是预算问题而不是服务故障。
@@ -127,10 +114,6 @@ async def _record_chat_usage(usage: dict | None) -> None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
         ) from exc
-
-    logger.info(
-        "问答计量 %s 缓存命中率 %.0f%%", snap.describe(), snap.cache_hit_ratio * 100
-    )
 
 
 async def _stream_answer(
