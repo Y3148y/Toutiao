@@ -1,24 +1,39 @@
-﻿# 今日头条后端 (Toutiao Backend)
+﻿# 📰 今日头条后端 · Toutiao Backend
 
-基于 FastAPI 的异步新闻资讯后端：**用户读新闻，不发新闻**。提供内容消费（信息流 / 分类 / 详情 / 热榜）、搜索、相关推荐、收藏与阅读历史，并在此之上实现基于新闻语料的**可溯源问答**——答案标注引用来源，证据不足时主动拒答而非让模型编造。
+<div align="center">
 
-### 为什么要做问答
+[![CI](https://github.com/Y3148y/Toutiao/actions/workflows/test.yml/badge.svg)](https://github.com/Y3148y/Toutiao/actions/workflows/test.yml)
+[![Python 3.10 | 3.11 | 3.12](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-%3E%3D0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
+[![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![Redis](https://img.shields.io/badge/Redis-%3E%3D5.0-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/)
+
+</div>
+
+---
+
+> **用户读新闻，不发新闻。** 异步新闻资讯后端，提供内容消费、搜索、相关推荐、收藏与阅读历史，并在此之上实现基于新闻语料的**可溯源问答**——答案标注引用来源，证据不足时主动拒答而非让模型编造。
+
+### 🤔 为什么要做问答
 
 起因是一个具体的痛点：用新闻 APP 时想找一条以前看过的报道，**记不清标题，只记得大概内容**（「去年 AI 出政策那次」）。而关键词搜索只匹配标题，这类自然语言表述一条都搜不到。
 
 所以给存量内容加了**语义检索 + 问答入口**：用户用日常语言提问，系统从已有新闻里找出相关的几条，并明确标出答案出自哪几篇。**可溯源**是这里的核心约束——新闻问答里最不能接受的错误类型是编造。
 
-### 能力概览
+### ✨ 能力概览
 
 | 能力 | 说明 |
 |------|------|
-| **内容消费** | 首页信息流（最新/热门/个性化）、分类列表、新闻详情、热度榜 |
-| **搜索** | 关键词搜索（BM25）+ 语义问答（RAG） |
-| **相关推荐** | 人工关联优先，冷启动退回同分类热门 |
-| **用户体系** | 注册登录、Token 鉴权、资料修改、改密、收藏、阅读历史 |
-| **AI 问答** | 流式/同步问答、多轮追问、答案溯源、置信拒答、匿名会话 |
+| 📰 **内容消费** | 首页信息流（最新/热门/个性化）、分类列表、新闻详情、热度榜 |
+| 🔍 **搜索** | 关键词搜索（BM25）+ 语义问答（RAG） |
+| 🔗 **相关推荐** | 人工关联优先，冷启动退回同分类热门 |
+| 👤 **用户体系** | 注册登录、Token 鉴权、资料修改、改密、收藏、阅读历史 |
+| 🤖 **AI 问答** | 流式/同步问答、多轮追问、答案溯源、置信拒答、匿名会话 |
 
-### 工程规模
+### 📊 工程规模
 
 | 指标 | 值 |
 |------|-----|
@@ -27,9 +42,12 @@
 | 生产代码 | 59 个文件 / 约 5,900 行 |
 | 测试代码 | 22 个文件 / 约 3,400 行 |
 | 检索语料 | 403 篇新闻；检索评估集 55 条用例（49 正例 + 6 负例） |
+| 检索质量 | Recall@5 **93.9%** · MRR@5 **90.5%** · 负例误召回 **16.7%** |
 | CI | GitHub Actions，Python 3.10 / 3.11 / 3.12 矩阵 |
 
-### 文档导航
+> ⚠️ 上面是**快照数据**，非 CI 实时读取。改动后请同步更新，或直接跑 `pytest -q` 与 `python -m scripts.check_routes` 复核。
+
+### 📚 文档导航
 
 | 文档 | 内容 |
 |------|------|
@@ -38,20 +56,22 @@
 | [`ai/eval/README.md`](ai/eval/README.md) | 检索质量评估：基线数据、负面结论、阈值标定过程 |
 | [`interview/`](interview/README.md) | 面试材料：简历写法、项目话术、RAG 八股文、高频面试题 |
 
-> 📋 **准备面试 / 想把这个项目写进简历？** 技术实现看本文，**话术和追问准备看 [`interview/`](interview/README.md)**。
+> 💼 **准备面试 / 想把这个项目写进简历？** 技术实现看本文，**话术和追问准备看 [`interview/`](interview/README.md)**。
 
-## 技术栈
+## 🛠️ 技术栈
 
 | 技术 | 版本/说明 |
 |------|-----------|
-| **Web 框架** | FastAPI |
+| **Web 框架** | FastAPI ≥ 0.115 |
 | **异步服务器** | Uvicorn |
 | **ORM** | SQLAlchemy 2.0 (Async) |
 | **数据库** | MySQL 8.0+ |
-| **异步驱动** | aiomysql |
-| **缓存** | Redis |
+| **异步驱动** | aiomysql / PyMySQL |
+| **缓存** | Redis ≥ 5.0 |
+| **向量计算** | NumPy ≥ 1.26 |
+| **大模型 SDK** | HTTPX ≥ 0.27 |
 | **数据验证** | Pydantic v2 |
-| **密码加密** | bcrypt |
+| **密码加密** | bcrypt ≥ 4.1（原生，不用 passlib，见 [🔐 认证与鉴权](#-认证与鉴权)） |
 | **跨域处理** | FastAPI CORSMiddleware |
 | **日志追踪** | logging + contextvars 请求 ID |
 | **限流** | Redis 令牌桶（Lua 脚本保证原子性） |
@@ -59,7 +79,7 @@
 | **测试** | pytest + pytest-asyncio（纯 mock，不依赖外部服务） |
 | **CI** | GitHub Actions（Python 3.10/3.11/3.12 矩阵） |
 
-## 项目结构
+## 📁 项目结构
 
 ```
 toutiao_backend/
@@ -145,66 +165,66 @@ toutiao_backend/
     └── exception_handlers.py  # 全局异常注册
 ```
 
-## 系统架构
+## 🏗️ 系统架构
 
-### 请求处理链路
+### 🔁 请求处理链路
 
-一次请求会依次穿过 5 个中间件再进入业务代码。注册顺序见 `main.py`（**`add_middleware` 是逆序生效**，所以最后注册的 `RateLimitMiddleware` 在最外层、最先看到请求）：
+一次请求依次穿过 5 个中间件再进入业务代码。注册顺序见 `main.py`（**`add_middleware` 逆序生效**，所以最后注册的 `RateLimitMiddleware` 在最外层、最先看到请求）：
 
-```
-                          ┌─────────────────────────────────────────┐
-   客户端 ──────────────▶ │  RateLimitMiddleware  令牌桶限流        │ ← 最先拦截
-   (Browser/APP)          │  Redis Lua 原子扣减；Redis 故障 fail-open │
-                          ├─────────────────────────────────────────┤
-                          │  RequestIdMiddleware                    │
-                          │  分配 X-Request-ID(contextvars)          │
-                          │  访问日志 + 耗时统计                     │
-                          ├─────────────────────────────────────────┤
-                          │  GZipMiddleware  响应压缩                │
-                          ├─────────────────────────────────────────┤
-                          │  CORSMiddleware  跨域                   │
-                          └─────────────────────────────────────────┘
-                                          ▼
-                          ┌─────────────────────────────────────────┐
-                          │  Routers  routers/ + ai/                │
-                          │  参数解析 · 依赖注入 · 统一响应体        │
-                          │  code / message / data                  │
-                          └─────────────────────────────────────────┘
-                                          ▼
-              ┌───────────────────────────┼───────────────────────────┐
-              ▼                           ▼                           ▼
-   ┌────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-   │  普通业务           │   │  AI 问答（RAG）       │   │  用户 / 收藏 / 历史    │
-   │  news_cache         │   │  retriever            │   │  users / favorite    │
-   │  先查缓存→再查库    │   │  BM25 + 向量 → RRF    │   │  history             │
-   │                    │   │  → 去重 → 三级判控    │   │  鉴权 + 事务写入      │
-   └─────────┬──────────┘   └──────────┬───────────┘   └──────────┬───────────┘
-             │                          │                          │
-             ▼                          ▼                          ▼
-   ┌──────────────────────────────────────────────────────┐   ┌──────────────┐
-   │  基础设施                                            │◀──│  models/     │
-   │  MySQL   业务数据 · 新闻语料 · 用户/Token/收藏/历史    │   │  schemas/    │
-   │  Redis   缓存 · 令牌桶 · 匿名会话 · 语料向量           │   │  （DTO）     │
-   │  DashScope  向量 API + 生成模型                       │   └──────────────┘
-   └──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    C["🌐 客户端<br/>Browser / App"]
+    RL["⛔ RateLimitMiddleware<br/>Redis Lua 原子扣减<br/>Redis 故障 fail-open 放行"]
+    RID["🔑 RequestIdMiddleware<br/>分配 X-Request-ID (contextvars)<br/>访问日志 + 耗时统计"]
+    GZ["📦 GZipMiddleware<br/>响应压缩"]
+    CORS["🌍 CORSMiddleware<br/>跨域"]
+    RT["🎯 Routers<br/>routers/ + ai/<br/>参数解析 · 依赖注入<br/>统一响应体 code/message/data"]
+
+    C --> RL --> RID --> GZ --> CORS --> RT
+
+    RT --> BIZ["📰 普通业务<br/>news_cache<br/>先查缓存 → 再查库"]
+    RT --> RAG["🤖 AI 问答 RAG<br/>BM25 + 向量 → RRF<br/>→ 去重 → 三级判控"]
+    RT --> U["👤 用户 / 收藏 / 历史<br/>鉴权 + 事务写入"]
+
+    BIZ --> INF["⚙️ 基础设施<br/>MySQL · Redis · DashScope"]
+    RAG --> INF
+    U --> INF
+
+    style C fill:#4A90D9,color:#fff
+    style RL fill:#D9534F,color:#fff
+    style RT fill:#5CB85C,color:#fff
+    style RAG fill:#9B59B6,color:#fff
+    style INF fill:#34495E,color:#fff
 ```
 
 > ⚠️ **`/docs`、`/redoc`、`/openapi.json` 不限流**（见 `utils/rate_limit.py` 的 `EXCLUDED_PREFIXES`）。
 
-### 分层职责
+### 🧱 分层职责
 
-```
-请求进来
-  ↓
-routers/    路由层：URL、方法、参数校验、依赖注入、组装响应 —— 不写业务、不写 SQL
-  ↓
-crud/       数据访问层：SQL、缓存读写、业务编排（核心）
-  ↓          ↘
-models/       cache/          config/
-ORM(DB映射)    Redis 封装        MySQL/Redis 连接配置
-  ↑
-schemas/     Pydantic DTO（贯穿进/出两层）
-utils/       鉴权 · 密码 · 统一响应 · 全局异常 · 限流 · 日志
+```mermaid
+flowchart TD
+    REQ(["请求进来"])
+    R["🟦 routers/<br/>路径·参数·依赖注入·组装响应<br/>不写业务、不写 SQL"]
+    A["🟪 ai/<br/>AI 问答与 RAG 检索链路<br/>自带路由"]
+    C["🟨 crud/<br/>SQL · 缓存读写 · 业务编排"]
+    M["🟩 models/<br/>SQLAlchemy ORM"]
+    S["🟪 schemas/<br/>Pydantic DTO"]
+    CA["🟧 cache/<br/>Redis 封装 · key 生成"]
+    CF["⬛ config/<br/>引擎 · 连接 · session 工厂"]
+    U["🟥 utils/<br/>鉴权·密码·响应·异常<br/>限流·日志"]
+
+    REQ --> R --> A --> C
+    C --> M
+    C --> CA
+    C --> CF
+    C --> S
+    U -. "横切关注" .-> R
+
+    style R fill:#3498DB,color:#fff
+    style A fill:#9B59B6,color:#fff
+    style C fill:#F1C40F,color:#000
+    style M fill:#2ECC71,color:#000
+    style U fill:#E74C3C,color:#fff
 ```
 
 | 层 | 职责 | 典型文件 |
@@ -218,9 +238,9 @@ utils/       鉴权 · 密码 · 统一响应 · 全局异常 · 限流 · 日�
 | `config/` | 引擎、session 工厂、连接配置 | `db_conf.py`、`cache_conf.py` |
 | `utils/` | 横切关注点 | `auth.py`、`security.py`、`rate_limit.py` |
 
-> `ai/` 下的两个 router 由 `main.py` 直接 `include_router`，不走 `routers/` 目录。
+> 💡 `ai/` 下的两个 router 由 `main.py` 直接 `include_router`，不走 `routers/` 目录。
 
-### 统一响应体
+### 📦 统一响应体
 
 所有接口返回同一结构，前端只需一套解析逻辑：
 
@@ -230,9 +250,9 @@ utils/       鉴权 · 密码 · 统一响应 · 全局异常 · 限流 · 日�
 
 分页接口的 `data` 内含 `list` / `total` / `page` / `pageSize` / `pages`。
 
-## 认证与鉴权
+## 🔐 认证与鉴权
 
-### 三种鉴权依赖
+### 🧠 三种鉴权依赖
 
 项目里有三个 FastAPI 依赖，分别对应「必须登录」「登录可选」「完全公开」：
 
@@ -248,9 +268,9 @@ utils/       鉴权 · 密码 · 统一响应 · 全局异常 · 限流 · 日�
 
 选 `get_optional_user` 而不是 `get_current_user` 的场景只有两类：**个性化排序**（登录后 feed 按偏好排序）和 **AI 问答的会话归属**（登录走 MySQL，匿名走 Redis）。
 
-### Token 机制
+### 🔑 Token 机制
 
-```
+```text
 POST /api/user/login  {username, password}
    └─▶ bcrypt 校验密码
    └─▶ 生成 UUID token，expires_at = now + 7 天
@@ -269,7 +289,7 @@ POST /api/user/login  {username, password}
 - Token 由 `uuid4()` 生成，存 `user_token` 表（不是 JWT）。**选择存库而非无状态 JWT，是为了能即时失效**——改密、封禁类需求可以直接删记录，无需等过期。
 - 有效期 **7 天**，校验时比对 `expires_at < now()`。
 
-### 密码安全
+### 🔒 密码安全
 
 bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/security.py`。
 
@@ -277,18 +297,18 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 >
 > **项目直接用原生 bcrypt 而非 passlib。** passlib 停留在 1.7.4，探测 bcrypt 后端时会发一个 73 字节的探针密码，而 bcrypt 4.1+ 明确禁止超过 72 字节，两者组合会让**注册接口直接 500**。
 
-### 匿名会话（仅 AI 问答）
+### 🟦 匿名会话（仅 AI 问答）
 
 未登录也能多轮追问，靠 `X-Anonymous-Id` 关联：
 
-```
+```text
 第 1 轮  请求不带该头 ──▶ 服务端生成 anon_id ──▶ 响应头返回 X-Anonymous-Id
 第 2 轮  前端带上该头 ──▶ 命中 Redis 历史（TTL 24h）──▶ 继续追问
 ```
 
 登录用户的历史存 `ai_chat` 表（持久），匿名用户存 Redis（24 小时过期）。
 
-### 端点鉴权一览
+### 📋 端点鉴权一览
 
 | 模块 | 免登录 | 需登录 | 登录可选 |
 |------|--------|--------|----------|
@@ -302,9 +322,9 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 > ⚠️ **`/api/ai/chat`（通用大模型代理）目前没有任何鉴权依赖。** 它会真实调用大模型产生费用，
 > 在公网部署前必须补上鉴权或网关白名单。当前只在本地/内网使用。
 
-## 功能模块
+## 🧩 功能模块
 
-### 1. 用户模块 (`/api/user`)
+### 1️⃣ 用户模块 (`/api/user`)
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
@@ -316,7 +336,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 
 > 认证机制、Token 生命周期与密码哈希细节见上文 [认证与鉴权](#认证与鉴权)。
 
-### 2. 新闻模块 (`/api/news`)
+### 2️⃣ 新闻模块 (`/api/news`)
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
@@ -345,7 +365,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 - 缓存封装：`cache/news_cache.py`
 - 带缓存的 CRUD：`crud/news_cache.py`
 
-### 3. 收藏模块 (`/api/favorite`)
+### 3️⃣ 收藏模块 (`/api/favorite`)
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
@@ -355,7 +375,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 | GET | `/list` | 分页获取收藏列表（按收藏时间倒序） | 是 |
 | DELETE | `/clear` | 清空全部收藏 | 是 |
 
-### 4. 浏览历史模块 (`/api/history`)
+### 4️⃣ 浏览历史模块 (`/api/history`)
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
@@ -364,7 +384,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 | DELETE | `/delete/{history_id}` | 删除单条浏览记录 | 是 |
 | DELETE | `/clear` | 清空全部浏览历史 | 是 |
 
-### 5. AI 问答模块 (`/api/ai`)
+### 5️⃣ AI 问答模块 (`/api/ai`)
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
@@ -379,29 +399,36 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 
 `DASHSCOPE_API_KEY` 只从服务端环境变量读取，不下发到前端；未配置时相关接口返回 500 并给出明确提示。上游错误（欠费 / 密钥无效 / 限流）会被映射成本服务状态码并保留原始错误码，便于排查。
 
-## 新闻问答（RAG）设计
+## 🤖 新闻问答（RAG）设计
 
-数据流：
+```mermaid
+flowchart TD
+    Q["❓ 用户提问"]
+    RW["✏️ 多轮检索词改写<br/>把上一轮「问题」并入当前 query<br/>（不带回答，避免稀释检索意图）"]
+    REC["🔍 双路召回<br/>BM25 top-20 + 向量 top-20"]
+    FUSE["🔀 RRF 融合<br/>score = Σ 1/(60+rank)"]
+    DEDUP["🧹 内容哈希去重<br/>同 hash 只留融合分最高的一条"]
+    GATE{"🎯 三级置信判控<br/>向量余弦 → BM25 → RRF"}
+    GEN["✅ 达标<br/>构造带约束 prompt<br/>LLM 生成 + [n] 引用编号"]
+    REF["🚫 不达标<br/>直接拒答，不调用 LLM"]
 
-```
-用户提问
-  → 多轮检索词改写（把上一轮问题并入当前 query）
-  → 混合检索（BM25 词面 + 向量语义 + RRF 融合）召回相关新闻
-  → 内容哈希去重（同 hash 只留融合分最高的一条）
-  → 三级置信判控（向量余弦 → BM25 分数 → RRF 兜底）
-  → 未达阈值？→ 直接拒答，不调用 LLM
-  → 构造带约束的 prompt（新闻编号 + 来源）
-  → SSE 流式返回，token 逐字透传
-  → 溯源信息作为首个事件下发
+    Q --> RW --> REC --> FUSE --> DEDUP --> GATE
+    GATE -->|证据充分| GEN
+    GATE -->|证据不足| REF
+
+    style Q fill:#4A90D9,color:#fff
+    style GEN fill:#2ECC71,color:#000
+    style REF fill:#E74C3C,color:#fff
+    style GATE fill:#F1C40F,color:#000
 ```
 
 实现见 `ai/retriever.py`、`ai/embeddings.py`、`ai/prompts.py`、`ai/news_qa.py`。
 
-### 为什么必须先检索再问
+### ❓ 为什么必须先检索再问
 
 模型不知道私有语料，而且它会编造看起来合理的新闻内容。新闻问答场景下这是最不能接受的错误类型。先把检索到的事实喂进去，再用 prompt 硬约束它只引用资料，答案才能溯源。
 
-### 为什么要混合检索
+### 🔀 为什么要混合检索
 
 两路的失败模式**互补**，这是混合检索的核心价值：
 
@@ -420,7 +447,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 
 **为什么用 RRF 而不是直接相加分数**：BM25 分数无上界，向量余弦在[-1,1]，量纲不同不能相加。RRF 只依赖排名不看分数：`score(d) = Σ 1/(k + rank)`，k=60 是原论文经验值，作用是压制头部排名的过度影响。
 
-### 防幻觉的三道约束
+### 🛡️ 防幻觉的三道约束
 
 1. **中文分词要求至少命中一个多字词**。纯单字命中是噪声 —— 「量子计算机」和「人工智能」共享「计」「算」，加上「的/中/国」这类高频字，任何两条新闻之间都能凑出共同单字。只靠单字命中的结果直接丢弃，否则无关问题也会走上 LLM。
 
@@ -430,7 +457,7 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 
 拒答时仍会把检索到的报道标题列给用户 —— 完全不给信息体验太差，而模型此时并没有编造的机会。
 
-### 性能与缓存
+### ⚡ 性能与缓存
 
 检索有两处重开销，都随语料缓存而非每次重算：
 
@@ -443,11 +470,11 @@ bcrypt，**rounds=12**（当前安全性与速度的平衡点），见 `utils/se
 
 语料指纹用 `(条数, 首尾 id, 首尾标题)` 计算，内容变化才失效。完整评估数据见 `ai/eval/README.md`。
 
-### 检索链路追踪
+### 🔍 检索链路追踪
 
 每次检索记录完整链路，`AI_TRACE_ENABLED=true` 时按 `request_id` 落到 Redis：
 
-```
+```text
 timing  : {'bm25Ms': 2.07, 'vectorMs': 302.18, 'fuseMs': 0.09, 'totalMs': 304.35}
 recall  : {'bm25Hits': 20, 'vectorHits': 0, 'vectorAvailable': False, 'degradedToBm25': True}
 decision: {'topScore': 10.65, 'threshold': 40.0, 'confident': False, 'willRefuse': True,
@@ -464,7 +491,7 @@ top1    : id=44 fusionScore=0.008197 bm25=1 vec=None single=True terms=['高铁'
 redis-cli -n 3 GET "ai:trace:<request_id>"
 ```
 
-### 离线索引管线
+### 🗂️ 离线索引管线
 
 显式构建流程，与检索时的懒加载并存。见 `ai/ingest/`：
 
@@ -517,18 +544,18 @@ python -m ai.ingest.cli clear                          # 清空索引
 误召回率 0%。用法与已知局限见 `ai/eval/README.md` —— 那里记录了两个必须知道的限制：
 阈值尚未标定、评估集的 gold 是按标题反推而非人工标注。
 
-### 已知限制
+### ⚠️ 已知限制
 
 - 置信阈值是按「单路/双路最高分的量级」手工校准的，**没有用标注集做量化评估**。要更严谨应该建一份QA 评测集，用 Recall@K / MRR 扫参数。
 - 向量服务不可用时会偏保守（见上文第 2 条）。
 
-## 数据库设计
+## 🗃️ 数据库设计
 
 数据库初始化脚本见 `resourse/database.sql`。
 
 > 脚本第一行的 `SET NAMES utf8mb4` 不能删。MySQL 客户端的默认字符集不一定是 utf8mb4（Docker 官方镜像初始化时就会出问题），少了这一行，中文会先按 latin1 读入再按 utf8mb4 存一次，变成双重编码的乱码，且乱码会直接写进库里。
 
-### 核心数据表
+### 📄 核心数据表
 
 1. **`user` 用户表**
    - 字段：id, username(唯一), password(bcrypt 哈希), nickname, avatar, gender, bio, phone(唯一), created_at, updated_at
@@ -559,7 +586,7 @@ python -m ai.ingest.cli clear                          # 清空索引
 8. **`ai_chat` AI聊天记录表**（预留）
    - 字段：id, user_id(FK→user), message, response, created_at
 
-## 统一响应格式
+## 📦 统一响应格式
 
 所有接口使用统一的 JSON 响应格式：
 
@@ -579,7 +606,7 @@ python -m ai.ingest.cli clear                          # 清空索引
 
 实现见 `utils/response.py`
 
-## 全局异常处理
+## ⚠️ 全局异常处理
 
 项目注册了 4 层异常处理器，具体见 `utils/exception_handlers.py`：
 
@@ -592,11 +619,11 @@ python -m ai.ingest.cli clear                          # 清空索引
 
 `DEBUG_MODE` 从环境变量读取且**默认为 false**。开启后会在 `data` 字段返回详细错误信息和堆栈追踪，生产环境必须关闭 —— 堆栈只应该出现在服务端日志里。
 
-## 日志与请求追踪
+## 📝 日志与请求追踪
 
 每个请求都会生成唯一 ID（优先复用上游传入的 `X-Request-ID`），通过响应头返回给前端，并注入到该请求的全部日志里：
 
-```
+```text
 2026-10-05 17:01:28 | INFO | req=a6842e44 | utils.middleware | GET /api/news/categories -> 200 耗时 13.4ms
 ```
 
@@ -607,17 +634,17 @@ python -m ai.ingest.cli clear                          # 清空索引
 > **为什么用 `contextvars` 而不是 `threading.local`？**
 > asyncio 是单线程协作式调度，多个请求的协程交替跑在同一个线程里。`threading.local` 只有一个副本，分不清请求；`contextvars` 是 per-Task 存储，asyncio 每创建一个 Task 就复制一份上下文，所以各请求互不干扰，又能在任意深的调用栈里通过 `get_request_id()` 取到。
 
-## 接口限流
+## 🛑️ 接口限流
 
 基于 Redis 的**令牌桶（Token Bucket）**，按「客户端 IP + 请求路径」分桶，见 `utils/rate_limit.py`。
 
-```
+```text
 ratelimit:{路径}:{IP}    -> HASH { tokens: 当前令牌数, ts: 上次更新时间 }
 ```
 
 桶初始装满 `capacity` 个令牌；每过 1 秒按 `rate` 个/秒匀速补充，上限封顶 `capacity`。请求消耗 1 个令牌，不够就返回 429：
 
-```
+```http
 HTTP/1.1 429 Too Many Requests
 Retry-After: 1
 X-RateLimit-Limit: 5
@@ -641,7 +668,7 @@ X-RateLimit-Remaining: 0
 
 > `X-Forwarded-For` 只在**可信反向代理**后面才应该信任，否则客户端可以伪造该头绕过限流。生产部署需保证前置代理清洗这些头。
 
-## 持续集成
+## 🚀 持续集成
 
 `.github/workflows/test.yml` 在 push 和 PR 时自动运行：
 
@@ -651,7 +678,7 @@ X-RateLimit-Remaining: 0
 
 因为测试不依赖外部服务，CI 不需要配 MySQL/Redis 容器，配置极简、跑得快。
 
-## 环境要求
+## 📦 环境要求
 
 - Python 3.10+
 - MySQL 8.0+
@@ -659,7 +686,7 @@ X-RateLimit-Remaining: 0
 
 > 不装本地 MySQL/Redis 也行 —— 用 Docker 一键起完整环境。
 
-## 快速开始（Docker，推荐）
+## 🚀 快速开始（Docker，推荐）
 
 ```bash
 docker compose up -d --build
@@ -682,16 +709,16 @@ docker compose down             # 停止
 docker compose down -v          # 停止并删除数据卷（会清库）
 ```
 
-## 本地开发
+## 🧰 本地开发
 
-### 1. 安装依赖
+### 1️⃣ 安装依赖
 
 ```bash
 pip install -r requirements.txt        # 运行时依赖
 pip install -r requirements-dev.txt    # 开发/测试依赖
 ```
 
-### 2. 配置环境变量
+### 2️⃣ 配置环境变量
 
 所有配置都从环境变量读取，**代码里不硬编码任何凭据**。可复制 `.env.example` 作为参考：
 
@@ -744,7 +771,7 @@ export AI_MAX_DOC_CHARS=400       # 每条新闻最多取多少字进上下文
 export AI_TRACE_ENABLED=false     # 开启后按 request_id 把检索链路落到 Redis
 ```
 
-### 6. 运行检索质量评估
+### 6️⃣ 运行检索质量评估
 
 ```bash
 python -m ai.eval.export_corpus                # 导出语料（改了 database.sql 需重跑）
@@ -755,13 +782,13 @@ python -m ai.eval.runner --baseline --vector-real   # 需有效 API Key
 
 所有变量都有默认值，未设置时回落到本地开发配置。
 
-### 3. 初始化数据库
+### 3️⃣ 初始化数据库
 
 ```bash
 mysql -u root -p < resourse/database.sql
 ```
 
-### 4. 启动服务
+### 4️⃣ 启动服务
 
 ```bash
 python main.py
@@ -779,7 +806,7 @@ uvicorn main:app --host 0.0.0.0 --port 3001 --reload
 - FastAPI 自动文档 (Swagger UI)：http://localhost:3001/docs
 - 备用文档 (ReDoc)：http://localhost:3001/redoc
 
-### 5. 运行测试
+### 5️⃣ 运行测试
 
 测试采用纯 mock 策略，**不依赖 MySQL 和 Redis**，本地/CI 都能直接跑：
 
@@ -803,9 +830,9 @@ pytest -q
 - **防幻觉**：SSE 溯源事件可 JSON 序列化（datetime 边界处理）、拒答文案包含已检索到的报道、system prompt 约束存在性
 - **接口契约**：所有接口返回 `code`/`message`/`data`，响应体中不再出现 `msg`
 
-## 关键代码示例
+## 🧰 关键代码示例
 
-### 数据库会话管理 (异步)
+### 🗃️ 数据库会话管理 (异步)
 
 `config/db_conf.py` 中使用 FastAPI 依赖注入模式管理异步数据库会话，自动提交/回滚/关闭：
 
@@ -822,7 +849,7 @@ async def get_db():
             await session.close()
 ```
 
-### Token 认证依赖
+### 🛡️ Token 认证依赖
 
 `utils/auth.py` 中作为 FastAPI `Depends` 使用，自动从 `Authorization` 头提取 Token 并查询用户：
 
@@ -832,7 +859,7 @@ async def get_user_info(user: User = Depends(get_current_user)):
     return success_response(data=user)
 ```
 
-### 联表查询 (收藏列表)
+### 🔗 联表查询 (收藏列表)
 
 `crud/favorite.py` 中使用 SQLAlchemy `join` 关联 News 和 Favorite 表：
 
@@ -845,7 +872,7 @@ query = (select(News, Favorite.created_at.label("favorite_time"), Favorite.id.la
          .limit(page_size))
 ```
 
-### 跨域配置
+### 🌍 跨域配置
 
 `main.py` 中配置了全局 CORS 中间件，来源可通过 `CORS_ORIGINS` 配置，开发环境允许所有来源：
 
